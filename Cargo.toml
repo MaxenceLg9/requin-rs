@@ -11,9 +11,6 @@ path = "src/bin/cli.rs"
 name = "gui"
 path = "src/bin/gui.rs"
 
-[[bin]]
-name = "pcap"
-path = "src/bin/pcap.rs"
 
 [lib]
 name = "shared"
@@ -21,7 +18,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gpui = { path = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui" }
-parser = { path = "./parser"}
+analyzer = { path = "./analyzer"}
 gpui_platform = { path  = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui_platform" , features = ["font-kit", "wayland", "x11"] }
 rtshark = "4.3.0"
 
