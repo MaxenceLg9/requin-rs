@@ -3,21 +3,14 @@ use std::{
     fs::File,
     io::{Error, ErrorKind, Read, Seek},
     str::FromStr,
-    time::Instant,
 };
 
-use crate::parser::header::PCapHeader;
-use crate::parser::layer::Layer;
+use crate::parser::{frame::Frame, header::PCapHeader};
 
 pub struct PCap<'a> {
-    layers: Vec<Frame<'a>>,
+    frames: Vec<Frame<'a>>,
     header: PCapHeader,
     size: u64,
-}
-
-pub struct Frame<'a> {
-    layers: Vec<Layer<'a>>,
-    timestamp: Instant,
 }
 
 impl<'a> PCap<'a> {
@@ -35,18 +28,34 @@ impl<'a> PCap<'a> {
         let _ = file.read(&mut buff)?;
         let header = buff.first_chunk::<24>().ok_or(ErrorKind::InvalidData)?;
         Ok(PCap {
-            layers: Vec::new(),
+            frames: Vec::new(),
             header: PCapHeader::new(header)?,
             size: size,
         })
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Frame<'a>> {
+        self.frames.get(index)
+    }
+
+    pub fn parse_next(&self) -> Option<&Frame<'a>> {
+        None
     }
 }
 
 impl<'a> Display for PCap<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut string = String::from_str("PCap File\n").unwrap();
-        writeln!(&mut string, "Size {}", self.size)?;
-        writeln!(&mut string, "Header {}", self.header)?;
+        writeln!(&mut string, "Size: {}", self.size)?;
+        writeln!(&mut string, "Header: {}", self.header)?;
+        writeln!(&mut string, "Frames:\n")?;
+        for layer in self.frames.iter() {
+            writeln!(
+                &mut string,
+                "{}",
+                layer.to_string(&self.header.ts_format, &self.header.number_format)?
+            )?;
+        }
         f.write_str(&string)
     }
 }

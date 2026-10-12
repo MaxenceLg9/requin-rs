@@ -9,6 +9,7 @@ fn main() -> Result<(), Error> {
 
     let pcap = PCap::new(filepath)?;
     println!("{}", pcap);
+    pcap.get(0);
 
     // let cert_path = args[2].as_str();
     // Creates a builder with needed tshark parameters

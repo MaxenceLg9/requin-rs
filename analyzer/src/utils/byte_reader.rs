@@ -14,28 +14,31 @@ impl<'a> BytesReader<'a> {
             .bytes
             .split_first_chunk::<N>()
             .ok_or(Error::other("Cannot read 0..4 bytes from pcap header"))?;
-        String::new().parse::<u16>();
         self.bytes = remaining;
         Ok(chunk)
     }
 
-    pub fn read_as<T: FromBytes, const N: usize>(&mut self) -> Result<T, Error> {
-        T::from_le(self.read_slice::<N>()?)
+    pub fn read_as_le<T: FromBytes, const N: usize>(&mut self) -> Result<T, Error> {
+        T::from_le_bytes_ptr(self.read_slice::<N>()?)
+    }
+
+    pub fn read_as_be<T: FromBytes, const N: usize>(&mut self) -> Result<T, Error> {
+        T::from_be_bytes_ptr(self.read_slice::<N>()?)
     }
 }
 
 pub trait FromBytes: Sized {
     const SIZE: usize;
-    fn from_le(bytes: &[u8]) -> Result<Self, Error>;
-    fn from_be(bytes: &[u8]) -> Result<Self, Error>;
+    fn from_le_bytes_ptr(bytes: &[u8]) -> Result<Self, Error>;
+    fn from_be_bytes_ptr(bytes: &[u8]) -> Result<Self, Error>;
 }
 
 macro_rules! impl_from_bytes {
     ($($t:ty),*) => {$(
         impl FromBytes for $t {
             const SIZE: usize = std::mem::size_of::<$t>();
-            fn from_le(b: &[u8]) -> Result<Self,Error> { Ok(Self::from_le_bytes(b.try_into().map_err(Error::other)?)) }
-            fn from_be(b: &[u8]) -> Result<Self,Error> { Ok(Self::from_be_bytes(b.try_into().map_err(Error::other)?)) }
+            fn from_le_bytes_ptr(b: &[u8]) -> Result<Self,Error> { Ok(Self::from_le_bytes(b.try_into().map_err(Error::other)?)) }
+            fn from_be_bytes_ptr(b: &[u8]) -> Result<Self,Error> { Ok(Self::from_be_bytes(b.try_into().map_err(Error::other)?)) }
         }
     )*};
 }
