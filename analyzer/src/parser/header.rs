@@ -30,7 +30,7 @@ pub struct PCapHeader {
 }
 
 impl PCapHeader {
-    pub fn new(header: &[u8; 24]) -> Result<PCapHeader, Error> {
+    pub fn new(header: &[u8; 24]) -> Option<PCapHeader> {
         let mut reader = BytesReader::new(header);
         if header.len() < 24 {
             Error::new(
@@ -43,14 +43,14 @@ impl PCapHeader {
         }
         // let slice = reader.read_as_le::<u32, 4>()?;
         let slice = reader.read_slice::<4>()?;
-        let (ts_format, number_format) = Self::get_ts_format(slice)?;
+        let (ts_format, number_format) = Self::get_ts_format(slice).ok()?;
         let major_version = reader.read_as_le::<u16, 2>()?;
         let minor_version = reader.read_as_le::<u16, 2>()?;
         let _ = reader.read_slice::<4>()?;
         let snap_len = reader.read_as_le::<u32, 4>()?;
         let fcs = reader.read_slice::<2>()?;
         let link_type = reader.read_as_le::<u16, 2>()?;
-        Ok(PCapHeader {
+        Some(PCapHeader {
             ts_format,
             number_format,
             major_version,
@@ -61,8 +61,10 @@ impl PCapHeader {
     }
 
     pub fn get_ts_format(bytes: &[u8]) -> Result<(TsFormat, NumberFormat), Error> {
-        let ts_format_be: u32 = u32::from_be_bytes_ptr(bytes)?;
-        let ts_format_le: u32 = u32::from_le_bytes_ptr(bytes)?;
+        let ts_format_be: u32 =
+            u32::from_be_bytes_ptr(bytes).ok_or_else(|| Error::other("error"))?;
+        let ts_format_le: u32 =
+            u32::from_le_bytes_ptr(bytes).ok_or_else(|| Error::other("error"))?;
 
         match ts_format_be {
             0xA1B23C4D => std::io::Result::Ok((TsFormat::Nano, NumberFormat::BigEndian)),
@@ -81,22 +83,17 @@ impl PCapHeader {
 
 impl Display for PCapHeader {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut string = String::from_str("PCap Header\n").unwrap();
+        f.write_str("PCap Header\n")?;
         match self.ts_format {
-            TsFormat::Nano => writeln!(&mut string, "Timestamp format: seconds; nanoseconds")?,
-            TsFormat::Micro => writeln!(&mut string, "Timestamp format: seconds; milliseconds")?,
+            TsFormat::Nano => f.write_str("Timestamp format: seconds; nanoseconds\n")?,
+            TsFormat::Micro => f.write_str("Timestamp format: seconds; microseconds\n")?,
         }
         match self.number_format {
-            NumberFormat::LittleEndian => writeln!(&mut string, "Number format: LittleEndian")?,
-            NumberFormat::BigEndian => writeln!(&mut string, "Number format: BigEndian")?,
+            NumberFormat::LittleEndian => f.write_str("Number format: LittleEndian\n")?,
+            NumberFormat::BigEndian => f.write_str("Number format: BigEndian\n")?,
         }
-        writeln!(
-            &mut string,
-            "Version: {}.{}",
-            self.major_version, self.minor_version
-        )?;
-        writeln!(&mut string, "SnapLen: {}", self.snap_len)?;
-        writeln!(&mut string, "LinkType: {}", self.link_type)?;
-        f.write_str(&string)
+        writeln!(f, "Version: {}.{}", self.major_version, self.minor_version)?;
+        writeln!(f, "SnapLen: {}", self.snap_len)?;
+        writeln!(f, "LinkType: {}", self.link_type)
     }
 }

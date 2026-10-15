@@ -25,6 +25,7 @@ gpui = { path = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui" }
 analyzer = { path = "./analyzer"}
 gpui_platform = { path  = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui_platform" , features = ["font-kit", "wayland", "x11"] }
 rtshark = "4.3.0"
+criterion = "0.8.2"
 # pcap-parser = "0.17.0"
 
 [patch.crates-io]

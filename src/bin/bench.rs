@@ -1,17 +1,14 @@
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use analyzer::parser::pcap::PCapStream;
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 fn bench(c: &mut Criterion) {
-    let file = std::fs::File::open("capture.pcap").unwrap();
-    let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
-    let n = open_records(&map).unwrap().count() as u64;
+    let mut pcap = PCapStream::new("rsasnakeoil2.cap").unwrap();
 
     let mut g = c.benchmark_group("parse");
-    g.throughput(Throughput::Elements(n));
+    g.throughput(Throughput::Elements(57));
     g.bench_function("pcap+tcp", |b| {
         b.iter(|| {
-            for (_, _, frame) in open_records(&map).unwrap() {
-                black_box(parse_frame(frame));
-            }
+            pcap.parse_next();
         })
     });
     g.finish();

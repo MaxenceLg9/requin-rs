@@ -1,8 +1,7 @@
-use analyzer::parser::header::PCapHeader;
 use analyzer::parser::pcap::PCapStream;
-use rtshark;
 use std::env;
-use std::io::Error;
+use std::io::Write;
+use std::io::{BufWriter, Error};
 use std::time::Instant;
 
 fn main() -> Result<(), Error> {
@@ -10,14 +9,16 @@ fn main() -> Result<(), Error> {
     let filepath = args[1].as_str();
 
     let mut pcap = PCapStream::new(filepath)?;
-    let time = Instant::now();
     println!("{}", pcap);
-    println!("{}", pcap.parse_next().unwrap().to_string().unwrap());
+    let time = Instant::now();
+
+    let stdout = std::io::stdout().lock();
+    let mut out = BufWriter::new(stdout);
     let mut i = 0;
     loop {
         match pcap.parse_next() {
             Some(frame) => {
-                println!("{}", frame.to_string().unwrap());
+                // writeln!(out, "{}", frame)?;
                 i += 1;
             }
             None => {
@@ -25,7 +26,7 @@ fn main() -> Result<(), Error> {
                 let ns = now.duration_since(time).as_nanos();
                 println!("Got none returning");
                 println!(
-                    "Read {} packets in {}ns, average of {}",
+                    "Read {} packets in {}ns, average of {}ns",
                     i,
                     ns,
                     ns as f64 / i as f64
@@ -34,6 +35,8 @@ fn main() -> Result<(), Error> {
             }
         }
     }
+
+    out.flush()?;
     // PcapNGReader
     Ok(())
 }

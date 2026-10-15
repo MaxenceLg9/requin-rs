@@ -15,31 +15,27 @@ use crate::{
 pub struct PCapStream<'a> {
     frames: Vec<Frame<'a>>,
     header: PCapHeader,
-    size: u64,
+    size: usize,
     reader: MmapReader,
     index: usize,
 }
 
 impl<'a> PCapStream<'a> {
     pub fn new(filepath: &str) -> Result<PCapStream<'a>, Error> {
-        let mut file = File::open(filepath)?;
-        let size = file.seek(std::io::SeekFrom::End(0))?;
-        let _ = file.seek(std::io::SeekFrom::Start(0));
-        if size < 24 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("The size of the header should be 24 but is {}", size),
-            ));
-        }
+        let file = File::open(filepath)?;
 
         let map = unsafe { Mmap::map(&file)? }; // file must not be modified while mapped
+        let size = map.len();
         let mut mmap_reader = MmapReader::new(map);
 
-        let header = mmap_reader.read_slice::<24>()?;
+        let header = mmap_reader.read_slice::<24>().ok_or_else(|| {
+            Error::new(ErrorKind::InvalidData, "Cannot get 24 bytes for the header")
+        })?;
 
         Ok(PCapStream {
             frames: Vec::new(),
-            header: PCapHeader::new(header)?,
+            header: PCapHeader::new(header)
+                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Cannot parse header"))?,
             size,
             index: 24,
             reader: mmap_reader,
@@ -59,10 +55,10 @@ impl<'a> PCapStream<'a> {
 
     fn parse_big_endian(&mut self) -> Option<&Frame<'a>> {
         // let buff = self.reader.read_slice::<16>().ok()?;
-        let timestamp_seconds = self.reader.read_as_be::<u32, 4>().ok()?;
-        let timestamp_2 = self.reader.read_as_be::<u32, 4>().ok()?;
-        let captured_pkt_len = self.reader.read_as_be::<u32, 4>().ok()?;
-        let original_pkt_len = self.reader.read_as_be::<u32, 4>().ok()?;
+        let timestamp_seconds = self.reader.read_as_be::<u32, 4>()?;
+        let timestamp_2 = self.reader.read_as_be::<u32, 4>()?;
+        let captured_pkt_len = self.reader.read_as_be::<u32, 4>()?;
+        let original_pkt_len = self.reader.read_as_be::<u32, 4>()?;
         self.frames.push(Frame::new(
             &self.header,
             timestamp_seconds,
@@ -74,10 +70,10 @@ impl<'a> PCapStream<'a> {
     }
 
     fn parse_little_endian(&mut self) -> Option<&Frame<'a>> {
-        let timestamp_seconds = self.reader.read_as_le::<u32, 4>().ok()?;
-        let timestamp_2 = self.reader.read_as_le::<u32, 4>().ok()?;
-        let captured_pkt_len = self.reader.read_as_le::<u32, 4>().ok()?;
-        let original_pkt_len = self.reader.read_as_le::<u32, 4>().ok()?;
+        let timestamp_seconds = self.reader.read_as_le::<u32, 4>()?;
+        let timestamp_2 = self.reader.read_as_le::<u32, 4>()?;
+        let captured_pkt_len = self.reader.read_as_le::<u32, 4>()?;
+        let original_pkt_len = self.reader.read_as_le::<u32, 4>()?;
 
         let data = self.reader.read_raw(captured_pkt_len as usize)?;
         self.frames.push(Frame::new(
@@ -93,13 +89,13 @@ impl<'a> PCapStream<'a> {
 
 impl<'a> Display for PCapStream<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut string = String::from_str("PCap File\n").unwrap();
-        writeln!(&mut string, "Size: {}", self.size)?;
-        writeln!(&mut string, "Header: {}", self.header)?;
-        writeln!(&mut string, "Frames:\n")?;
+        f.write_str("PCap File\n")?;
+        writeln!(f, "Size: {}", self.size)?;
+        writeln!(f, "Header: {}", self.header)?;
+        f.write_str("Frames:")?;
         for layer in self.frames.iter() {
-            writeln!(&mut string, "{}", layer.to_string()?)?;
+            writeln!(f, "{}", layer)?;
         }
-        f.write_str(&string)
+        fmt::Result::Ok(())
     }
 }

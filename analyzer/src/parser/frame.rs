@@ -1,4 +1,4 @@
-use std::fmt::Write;
+use std::fmt::{self, Display, Write};
 
 use crate::parser::{
     header::{NumberFormat, PCapHeader, TsFormat},
@@ -33,19 +33,22 @@ impl<'a> Frame<'a> {
             captured_pkt_len,
         }
     }
+}
 
-    pub fn to_string(&self) -> Result<String, std::fmt::Error> {
-        let mut string = format!("Timestamp {}s ", self.timestamp_seconds);
+impl<'a> Display for Frame<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Timestamp {}s ", self.timestamp_seconds)?;
         match self.ts_format {
-            TsFormat::Nano => writeln!(&mut string, "{}ns", self.timestamp_2)?,
-            TsFormat::Micro => writeln!(&mut string, "{}ms", self.timestamp_2)?,
+            TsFormat::Nano => writeln!(f, "{}ns", self.timestamp_2)?,
+            TsFormat::Micro => writeln!(f, "{}µs", self.timestamp_2)?,
         };
         writeln!(
-            &mut string,
+            f,
             "Captured {}/{} bytes",
             self.captured_pkt_len, self.original_pkt_len
         )?;
+
         for layer in self.layers.iter() {}
-        Ok(string)
+        fmt::Result::Ok(())
     }
 }
