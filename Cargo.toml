@@ -11,6 +11,10 @@ path = "src/bin/cli.rs"
 name = "gui"
 path = "src/bin/gui.rs"
 
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
 
 [lib]
 name = "shared"
@@ -21,6 +25,7 @@ gpui = { path = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui" }
 analyzer = { path = "./analyzer"}
 gpui_platform = { path  = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui_platform" , features = ["font-kit", "wayland", "x11"] }
 rtshark = "4.3.0"
+# pcap-parser = "0.17.0"
 
 [patch.crates-io]
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }

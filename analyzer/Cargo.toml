@@ -6,3 +6,6 @@ edition = "2024"
 [lib]
 name = "analyzer"
 path = "src/analyzer.rs"
+
+[dependencies]
+memmap2 = "0.9.11"

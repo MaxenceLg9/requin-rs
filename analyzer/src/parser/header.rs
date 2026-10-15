@@ -5,13 +5,16 @@ use std::{
     str::FromStr,
 };
 
-use crate::utils::byte_reader::{BytesReader, FromBytes};
+use crate::utils::byte_reader::BytesReader;
+use crate::utils::mmap_reader::FromBytes;
 
+#[derive(Clone, Copy)]
 pub enum TsFormat {
     Nano,
     Micro,
 }
 
+#[derive(Clone, Copy)]
 pub enum NumberFormat {
     BigEndian,
     LittleEndian,

@@ -1,5 +1,7 @@
 use std::io::Error;
 
+use crate::utils::mmap_reader::FromBytes;
+
 pub struct BytesReader<'a> {
     bytes: &'a [u8],
 }
@@ -26,21 +28,3 @@ impl<'a> BytesReader<'a> {
         T::from_be_bytes_ptr(self.read_slice::<N>()?)
     }
 }
-
-pub trait FromBytes: Sized {
-    const SIZE: usize;
-    fn from_le_bytes_ptr(bytes: &[u8]) -> Result<Self, Error>;
-    fn from_be_bytes_ptr(bytes: &[u8]) -> Result<Self, Error>;
-}
-
-macro_rules! impl_from_bytes {
-    ($($t:ty),*) => {$(
-        impl FromBytes for $t {
-            const SIZE: usize = std::mem::size_of::<$t>();
-            fn from_le_bytes_ptr(b: &[u8]) -> Result<Self,Error> { Ok(Self::from_le_bytes(b.try_into().map_err(Error::other)?)) }
-            fn from_be_bytes_ptr(b: &[u8]) -> Result<Self,Error> { Ok(Self::from_be_bytes(b.try_into().map_err(Error::other)?)) }
-        }
-    )*};
-}
-
-impl_from_bytes!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, f64);
