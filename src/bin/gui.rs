@@ -357,10 +357,3 @@ fn run_example() {
 fn main() {
     run_example();
 }
-
-#[cfg(target_family = "wasm")]
-#[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub fn start() {
-    gpui_platform::web_init();
-    run_example();
-}
