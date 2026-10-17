@@ -4,9 +4,9 @@ use shared::example_support;
 
 use gpui::{
     App, Bounds, Context, KeyBinding, PromptButton, PromptLevel, Window, WindowBounds, WindowKind,
-    WindowOptions, WindowingModes, actions, div, prelude::*, px, rgb, size,
+    WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
-use gpui_platform::{application, linux};
+use gpui_platform::application;
 
 struct SubWindow {
     custom_titlebar: bool,

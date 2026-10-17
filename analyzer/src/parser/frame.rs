@@ -1,4 +1,4 @@
-use std::fmt::{self, Display, Write};
+use std::fmt::{self, Display};
 
 use crate::parser::{
     header::{NumberFormat, PCapHeader, TsFormat},

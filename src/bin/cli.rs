@@ -17,14 +17,14 @@ fn main() -> Result<(), Error> {
     let mut i = 0;
     loop {
         match pcap.parse_next() {
-            Some(frame) => {
+            Ok(_frame) => {
                 // writeln!(out, "{}", frame)?;
                 i += 1;
             }
-            None => {
+            Err(e) => {
                 let now = Instant::now();
                 let ns = now.duration_since(time).as_nanos();
-                println!("Got none returning");
+                println!("Got error {}, returning", e);
                 println!(
                     "Read {} packets in {}ns, average of {}ns",
                     i,
