@@ -34,8 +34,9 @@ impl MmapReader {
             .get(self.index..self.index + N)
             .ok_or_else(|| Error::new(InvalidInput, "Cannot slice the array"))?
             .try_into()
-            .map_err(|e| Error::new(InvalidInput, format!("{}", e)));
+            .map_err(|e| Error::other(e));
         self.index += N;
+
         temp
     }
 
@@ -43,6 +44,10 @@ impl MmapReader {
         let temp = self.mmap.get(self.index..self.index + n);
         self.index += n;
         temp
+    }
+
+    pub fn reset(&mut self) {
+        self.index = 24
     }
 
     pub fn read_as_le<T: FromBytes, const N: usize>(&mut self) -> Result<T, Error> {

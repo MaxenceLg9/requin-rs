@@ -6,6 +6,9 @@ use std::time::Instant;
 
 fn main() -> Result<(), Error> {
     let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        return Err(Error::other("File missing"));
+    }
     let filepath = args[1].as_str();
 
     let mut pcap = PCapStream::new(filepath)?;

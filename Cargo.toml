@@ -11,24 +11,22 @@ path = "src/bin/cli.rs"
 name = "gui"
 path = "src/bin/gui.rs"
 
-# [[bin]]
-# name = "bench"
-# path = "src/bin/bench.rs"
-
 [[bench]]
 name = "bench"
 path = "src/bin/bench.rs" # file: benches/parse.rs
 harness = false
 
+[profile.release]
+debug = true
 
 [lib]
 name = "shared"
 path = "src/lib.rs"
 
 [dependencies]
-gpui = { path = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui" }
+gpui = { path = "../../Lib/zed/crates/gpui" }
 analyzer = { path = "./analyzer"}
-gpui_platform = { path  = "/home/alcyoneus/Documents/Dev/Prog/Rust/Lib/zed/crates/gpui_platform" , features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { path  = "../../Lib/zed/crates/gpui_platform" , features = ["font-kit", "wayland", "x11"] }
 rtshark = "4.3.0"
 criterion = "0.8.2"
 # pcap-parser = "0.17.0"
