@@ -34,7 +34,7 @@ impl MmapReader {
             .get(self.index..self.index + N)
             .ok_or_else(|| Error::new(InvalidInput, "Cannot slice the array"))?
             .try_into()
-            .map_err(|e| Error::other(e));
+            .map_err(|e| Error::other(format!("{}, {}, {}", file!(), line!(), e)));
         self.index += N;
 
         temp

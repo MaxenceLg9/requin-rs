@@ -31,8 +31,8 @@ pub struct PCapHeader {
 
 impl PCapHeader {
     pub fn get_ts_format(bytes: &[u8]) -> Result<(TsFormat, NumberFormat), Error> {
-        let ts_format_be: u32 = u32::from_be_bytes_ptr(bytes)?;
-        let ts_format_le: u32 = u32::from_le_bytes_ptr(bytes)?;
+        let ts_format_be: u32 = u32::from_be_bytes_ptr(bytes).expect("AA");
+        let ts_format_le: u32 = u32::from_le_bytes_ptr(bytes).expect("BB");
 
         match ts_format_be {
             0xA1B23C4D => Ok((TsFormat::Nano, NumberFormat::BigEndian)),
