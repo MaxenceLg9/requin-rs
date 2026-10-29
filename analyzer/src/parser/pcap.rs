@@ -46,7 +46,7 @@ impl<'a> PCapStream<'a> {
         let (ts_format, number_format) = PCapHeader::get_ts_format(&buffer[0..4])?;
 
         let major_version = u16::from_be_bytes_ptr(&buffer[4..6])?;
-        let minor_version = u16::from_be_bytes_ptr(&buffer[6..10])?;
+        let minor_version = u16::from_be_bytes_ptr(&buffer[6..8])?;
 
         let snap_len = u32::from_be_bytes_ptr(&buffer[16..20])?;
         let fcs = &buffer[20..22];

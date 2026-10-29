@@ -1,4 +1,7 @@
-use std::io::{Error, ErrorKind::InvalidInput};
+use std::io::{
+    Error,
+    ErrorKind::{self, InvalidInput},
+};
 
 use memmap2::Mmap;
 
@@ -23,6 +26,9 @@ impl MmapReader {
     }
 
     pub fn read_slice<const N: usize>(&mut self) -> Result<&[u8; N], Error> {
+        if self.mmap.len() - self.index < N {
+            return Err(Error::new(ErrorKind::NotFound, "Not enough data to read"));
+        }
         let temp = self
             .mmap
             .get(self.index..self.index + N)
