@@ -30,17 +30,17 @@ pub struct PCapHeader {
 }
 
 impl PCapHeader {
-    pub fn get_ts_format(bytes: &[u8]) -> Result<(TsFormat, NumberFormat), Error> {
-        let ts_format_be: u32 = u32::from_be_bytes_ptr(bytes).expect("AA");
-        let ts_format_le: u32 = u32::from_le_bytes_ptr(bytes).expect("BB");
+    pub fn get_ts_format(bytes: &[u8]) -> Option<(TsFormat, NumberFormat)> {
+        let ts_format_be: u32 = u32::from_be_bytes_ptr(bytes).expect("Cannot parse format into be");
+        let ts_format_le: u32 = u32::from_le_bytes_ptr(bytes).expect("Cannot parse format into le");
 
         match ts_format_be {
-            0xA1B23C4D => Ok((TsFormat::Nano, NumberFormat::BigEndian)),
-            0xA1B2C3D4 => Ok((TsFormat::Micro, NumberFormat::BigEndian)),
+            0xA1B23C4D => Some((TsFormat::Nano, NumberFormat::BigEndian)),
+            0xA1B2C3D4 => Some((TsFormat::Micro, NumberFormat::BigEndian)),
             _ => match ts_format_le {
-                0xA1B23C4D => Ok((TsFormat::Nano, NumberFormat::LittleEndian)),
-                0xA1B2C3D4 => Ok((TsFormat::Micro, NumberFormat::LittleEndian)),
-                _ => Err(Error::new(InvalidData, "Cannot parse the format")),
+                0xA1B23C4D => Some((TsFormat::Nano, NumberFormat::LittleEndian)),
+                0xA1B2C3D4 => Some((TsFormat::Micro, NumberFormat::LittleEndian)),
+                _ => panic!("Cannot parse the format"),
             },
         }
     }

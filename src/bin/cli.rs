@@ -20,25 +20,26 @@ fn main() -> Result<(), Error> {
     let mut i = 0;
     loop {
         match pcap.parse_next() {
-            Ok(_frame) => {
+            Some(_frame) => {
                 // writeln!(out, "{}", frame)?;
                 i += 1;
             }
-            Err(e) => {
-                let now = Instant::now();
-                let ns = now.duration_since(time).as_nanos();
-                println!("Got error {}, returning", e);
-                println!(
-                    "Read {} packets in {}ns, average of {}ns",
-                    i,
-                    ns,
-                    ns as f64 / i as f64
-                );
-                break;
+            None => {
+                pcap.reset();
+                if i > 100 {
+                    break;
+                }
             }
         }
     }
-
+    let now = Instant::now();
+    let ns = now.duration_since(time).as_nanos();
+    println!(
+        "Read {} packets in {}ms, average of {}ns",
+        i,
+        ns / 1_000_000,
+        ns as f64 / i as f64
+    );
     out.flush()?;
     // PcapNGReader
     Ok(())

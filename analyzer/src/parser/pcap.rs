@@ -1,38 +1,38 @@
 use std::{
     fmt::{self, Display, Formatter},
     fs::File,
-    io::{Error, ErrorKind},
+    io::{Error, ErrorKind, Read},
 };
 
 use crate::{
     parser::{frame::Frame, header::PCapHeader},
-    utils::mmap_reader::MmapReader,
-    utils::traits::FromBytes,
+    utils::{file_reader::FileReader, traits::FromBytes},
 };
 use memmap2::Mmap;
 
 pub struct PCapStream<'a> {
     frames: Vec<Frame<'a>>,
     header: PCapHeader,
-    reader: MmapReader,
+    reader: FileReader,
 }
 
 impl<'a> PCapStream<'a> {
     pub fn new(filepath: &str) -> Result<PCapStream<'a>, Error> {
         let file = File::open(filepath)?;
 
-        let map = unsafe { Mmap::map(&file)? }; // file must not be modified while mapped
-        map.advise(memmap2::Advice::Sequential)?;
-        let mut mmap_reader = MmapReader::new(map);
-
+        let mut file_reader = FileReader::new(file)?;
         Ok(PCapStream {
             frames: Vec::new(),
-            header: Self::parse_header(&mut mmap_reader)?,
-            reader: mmap_reader,
+            header: Self::parse_header(&mut file_reader).expect("Cannot parse header"),
+            reader: file_reader,
         })
     }
 
-    fn parse_header(reader: &mut MmapReader) -> Result<PCapHeader, Error> {
+    pub fn reset(&mut self) {
+        self.reader.reset();
+    }
+
+    fn parse_header(reader: &mut FileReader) -> Option<PCapHeader> {
         // let (ts_format, number_format) = PCapHeader::get_ts_format(reader.read_slice::<4>()?)?;
         // let major_version = reader.read_as_le::<u16, 2>()?;
         // let minor_version = reader.read_as_le::<u16, 2>()?;
@@ -51,7 +51,7 @@ impl<'a> PCapStream<'a> {
         let snap_len = u32::from_be_bytes_ptr(&buffer[16..20])?;
         let fcs = &buffer[20..22];
         let link_type = u16::from_be_bytes_ptr(&buffer[22..24])?;
-        Ok(PCapHeader {
+        Some(PCapHeader {
             ts_format,
             number_format,
             major_version,
@@ -65,31 +65,29 @@ impl<'a> PCapStream<'a> {
         &self.header
     }
 
-    pub fn parse_next(&mut self) -> Result<Frame<'a>, Error> {
+    pub fn parse_next(&mut self) -> Option<Frame<'a>> {
         match self.header.number_format {
             super::header::NumberFormat::LittleEndian => self.parse_little_endian(),
             super::header::NumberFormat::BigEndian => self.parse_big_endian(),
         }
     }
 
-    pub fn add_next(&mut self) -> Result<&Frame<'a>, Error> {
+    pub fn add_next(&mut self) -> Option<&Frame<'a>> {
         let frame = match self.header.number_format {
             super::header::NumberFormat::LittleEndian => self.parse_little_endian(),
             super::header::NumberFormat::BigEndian => self.parse_big_endian(),
         };
         self.frames.push(frame?);
-        self.frames
-            .last()
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, "There is no last in the vector"))
+        self.frames.last()
     }
 
-    fn parse_big_endian(&mut self) -> Result<Frame<'a>, Error> {
+    fn parse_big_endian(&mut self) -> Option<Frame<'a>> {
         // let buff = self.reader.read_slice::<16>().ok()?;
         let timestamp_seconds = self.reader.read_as_be::<u32, 4>()?;
         let timestamp_2 = self.reader.read_as_be::<u32, 4>()?;
         let captured_pkt_len = self.reader.read_as_be::<u32, 4>()?;
         let original_pkt_len = self.reader.read_as_be::<u32, 4>()?;
-        Ok(Frame::new(
+        Some(Frame::new(
             &self.header,
             timestamp_seconds,
             timestamp_2,
@@ -98,7 +96,7 @@ impl<'a> PCapStream<'a> {
         ))
     }
 
-    fn parse_little_endian(&mut self) -> Result<Frame<'a>, Error> {
+    fn parse_little_endian(&mut self) -> Option<Frame<'a>> {
         // let func = |buff: &[u8]| Some(u32::from_le_bytes(buff.try_into().ok()?));
         let timestamp_seconds = self.reader.read_as_le::<u32, 4>()?;
         let timestamp_2 = self.reader.read_as_le::<u32, 4>()?;
@@ -111,11 +109,8 @@ impl<'a> PCapStream<'a> {
         // let captured_pkt_len = func(&f_header[8..12])?;
         // let original_pkt_len = func(&f_header[12..16])?;
 
-        let _data = self
-            .reader
-            .read_raw(captured_pkt_len as usize)
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Cannot read"))?;
-        Ok(Frame::new(
+        let _data = self.reader.read_raw(captured_pkt_len as usize)?;
+        Some(Frame::new(
             &self.header,
             timestamp_seconds,
             timestamp_2,
