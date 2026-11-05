@@ -1,46 +1,78 @@
 use analyzer::parser::pcap::PCapStream;
-use std::env;
-use std::io::Write;
-use std::io::{BufWriter, Error};
-use std::time::Instant;
+use std::{
+    env,
+    io::{self, BufWriter, Error, Write},
+    time::Instant,
+};
 
 fn main() -> Result<(), Error> {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        return Err(Error::other("File missing"));
-    }
-    let filepath = args[1].as_str();
-
-    let mut pcap = PCapStream::new(filepath)?;
-    println!("{}", pcap);
-    let time = Instant::now();
-
-    let stdout = std::io::stdout().lock();
-    let mut out = BufWriter::new(stdout);
-    let mut i = 0;
-    loop {
-        match pcap.parse_next() {
-            Some(_frame) => {
-                // writeln!(out, "{}", frame)?;
-                i += 1;
+    let mut filepath = None;
+    let mut text_output = false;
+    let mut plugins = Vec::new();
+    let mut plugin_directories = Vec::new();
+    let mut arguments = env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--text" | "-t" => text_output = true,
+            "--help" | "-h" => {
+                println!(
+                    "Usage: cli [--text] [--plugin <library>]... [--plugins-dir <directory>] <capture-file>"
+                );
+                return Ok(());
             }
-            None => {
-                pcap.reset();
-                if i > 100 {
-                    break;
-                }
-            }
+            "--plugin" => plugins.push(
+                arguments
+                    .next()
+                    .ok_or_else(|| Error::other("--plugin requires a library path"))?,
+            ),
+            "--plugins-dir" => plugin_directories.push(
+                arguments
+                    .next()
+                    .ok_or_else(|| Error::other("--plugins-dir requires a directory path"))?,
+            ),
+            _ if filepath.is_none() => filepath = Some(argument),
+            _ => return Err(Error::other("unexpected extra argument")),
         }
     }
-    let now = Instant::now();
-    let ns = now.duration_since(time).as_nanos();
-    println!(
-        "Read {} packets in {}ms, average of {}ns",
-        i,
-        ns / 1_000_000,
-        ns as f64 / i as f64
+    let filepath = filepath.ok_or_else(|| Error::other("capture file missing"))?;
+    let mut capture = PCapStream::new(&filepath)?;
+    for directory in plugin_directories {
+        let loaded = capture.load_plugins_from_dir(&directory)?;
+        eprintln!("Loaded {loaded} plugin(s) from {directory}");
+    }
+    for plugin in plugins {
+        capture.load_plugin(&plugin)?;
+        eprintln!("Loaded plugin {plugin}");
+    }
+    let start = Instant::now();
+    let mut count = 0_u64;
+
+    if text_output {
+        let stdout = io::stdout().lock();
+        let mut output = BufWriter::new(stdout);
+        while capture
+            .with_next_frame(|frame| writeln!(output, "{frame}"))?
+            .transpose()?
+            .is_some()
+        {
+            count += 1;
+        }
+        output.flush()?;
+    } else {
+        while capture.parse_next_summary()?.is_some() {
+            count += 1;
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let average_ns = if count == 0 {
+        0.0
+    } else {
+        elapsed.as_nanos() as f64 / count as f64
+    };
+    eprintln!(
+        "Read {count} packets in {}ms, average of {average_ns:.1}ns",
+        elapsed.as_millis()
     );
-    out.flush()?;
-    // PcapNGReader
     Ok(())
 }
