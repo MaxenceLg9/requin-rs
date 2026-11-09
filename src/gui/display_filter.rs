@@ -292,6 +292,8 @@ fn known_filter_field(field: &str) -> bool {
             | "icmp.code"
             | "icmpv6.type"
             | "icmpv6.code"
+            | "ndp.type"
+            | "ndp.code"
             | "port"
     )
 }
@@ -377,8 +379,8 @@ fn filter_field_value(field: &str, packet: &CaptureSummary) -> Option<String> {
         "udp.srcport" if summary.transport == Some("UDP") => summary.source_port?.to_string(),
         "udp.dstport" if summary.transport == Some("UDP") => summary.destination_port?.to_string(),
         "udp.length" => summary.udp_length?.to_string(),
-        "icmp.type" | "icmpv6.type" => summary.icmp_type?.to_string(),
-        "icmp.code" | "icmpv6.code" => summary.icmp_code?.to_string(),
+        "icmp.type" | "icmpv6.type" | "ndp.type" => summary.icmp_type?.to_string(),
+        "icmp.code" | "icmpv6.code" | "ndp.code" => summary.icmp_code?.to_string(),
         "port" => {
             return Some(format!(
                 "{}\0{}",

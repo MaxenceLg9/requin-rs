@@ -34,8 +34,18 @@ impl DecoderRegistry {
             application_decoders: vec![
                 Box::new(DnsDecoder),
                 Box::new(DhcpDecoder),
+                Box::new(DhcpV6Decoder),
+                Box::new(SipDecoder),
                 Box::new(HttpDecoder),
                 Box::new(TlsDecoder),
+                Box::new(SshDecoder),
+                Box::new(SmtpDecoder),
+                Box::new(ImapDecoder),
+                Box::new(VxlanDecoder),
+                Box::new(GssapiDecoder),
+                Box::new(NtpDecoder),
+                Box::new(TftpDecoder),
+                Box::new(FtpDecoder),
             ],
             plugin_libraries: Vec::new(),
             plugin_names: Vec::new(),
@@ -70,8 +80,429 @@ impl Default for DecoderRegistry {
 
 struct DnsDecoder;
 struct DhcpDecoder;
+struct DhcpV6Decoder;
 struct HttpDecoder;
 struct TlsDecoder;
+struct SshDecoder;
+struct SmtpDecoder;
+struct ImapDecoder;
+struct VxlanDecoder;
+struct GssapiDecoder;
+struct NtpDecoder;
+struct TftpDecoder;
+struct SipDecoder;
+struct FtpDecoder;
+
+impl ApplicationDecoder for NtpDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 17
+            || (transport.source_port != 123 && transport.destination_port != 123)
+            || payload.len() < 48
+        {
+            return None;
+        }
+
+        let flags = payload[0];
+        let mut layer = Layer::with_capacity("Network Time Protocol", 24);
+        push(
+            &mut layer,
+            "Leap indicator",
+            match flags >> 6 {
+                0 => "No warning",
+                1 => "Last minute has 61 seconds",
+                2 => "Last minute has 59 seconds",
+                _ => "Alarm condition",
+            },
+            offset,
+            1,
+        );
+        push(&mut layer, "Version", (flags >> 3) & 0x07, offset, 1);
+        push(&mut layer, "Mode", ntp_mode(flags & 0x07), offset, 1);
+        push(&mut layer, "Stratum", payload[1], offset + 1, 1);
+        push(
+            &mut layer,
+            "Poll interval",
+            i8::from_be_bytes([payload[2]]).to_string(),
+            offset + 2,
+            1,
+        );
+        push(
+            &mut layer,
+            "Precision",
+            i8::from_be_bytes([payload[3]]).to_string(),
+            offset + 3,
+            1,
+        );
+        let root_delay = i32::from_be_bytes(payload[4..8].try_into().ok()?);
+        push(
+            &mut layer,
+            "Root delay",
+            format!("{:.4}", f64::from(root_delay) / 65_536.0),
+            offset + 4,
+            4,
+        );
+        let root_dispersion = be_u32(payload, 8)?;
+        push(
+            &mut layer,
+            "Root dispersion",
+            format!("{:.4}", f64::from(root_dispersion) / 65_536.0),
+            offset + 8,
+            4,
+        );
+        layer
+            .fields
+            .push(Field::new("Reference ID", encode_hex(&payload[12..16])).at(offset + 12, 4));
+        for (name, start) in [
+            ("Reference timestamp", 16),
+            ("Originate timestamp", 24),
+            ("Receive timestamp", 32),
+            ("Transmit timestamp", 40),
+        ] {
+            push(
+                &mut layer,
+                format!("{name} seconds"),
+                be_u32(payload, start)?,
+                offset + start,
+                4,
+            );
+            push(
+                &mut layer,
+                format!("{name} fraction"),
+                be_u32(payload, start + 4)?,
+                offset + start + 4,
+                4,
+            );
+        }
+
+        let mut cursor = 48;
+        while cursor + 4 <= payload.len() {
+            let length = usize::from(be_u16(payload, cursor + 2)?);
+            if length < 4 || length % 4 != 0 || cursor.checked_add(length)? > payload.len() {
+                break;
+            }
+            push(
+                &mut layer,
+                "Extension type",
+                be_u16(payload, cursor)?,
+                offset + cursor,
+                2,
+            );
+            push(
+                &mut layer,
+                "Extension length",
+                length as u64,
+                offset + cursor + 2,
+                2,
+            );
+            layer.fields.push(
+                Field::new(
+                    "Extension data",
+                    payload[cursor + 4..cursor + length].to_vec(),
+                )
+                .at(offset + cursor + 4, length - 4),
+            );
+            cursor += length;
+        }
+        if payload.len() - cursor >= 4 {
+            push(
+                &mut layer,
+                "Authentication key ID",
+                be_u32(payload, cursor)?,
+                offset + cursor,
+                4,
+            );
+            if cursor + 4 < payload.len() {
+                layer.fields.push(
+                    Field::new("Authentication digest", payload[cursor + 4..].to_vec())
+                        .at(offset + cursor + 4, payload.len() - cursor - 4),
+                );
+            }
+        } else if cursor < payload.len() {
+            layer.fields.push(
+                Field::new("Trailing data", payload[cursor..].to_vec())
+                    .at(offset + cursor, payload.len() - cursor),
+            );
+        }
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for TftpDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 17
+            || (transport.source_port != 69 && transport.destination_port != 69)
+        {
+            return None;
+        }
+        let opcode = be_u16(payload, 0)?;
+        let mut layer = Layer::with_capacity("Trivial File Transfer Protocol", 8);
+        push(&mut layer, "Opcode", tftp_opcode(opcode)?, offset, 2);
+        match opcode {
+            1 | 2 => {
+                let (filename, consumed) = tftp_string(payload, 2)?;
+                let (mode, mode_consumed) = tftp_string(payload, 2 + consumed)?;
+                if filename.is_empty() || mode.is_empty() {
+                    return None;
+                }
+                layer
+                    .fields
+                    .push(Field::new("Filename", filename).at(offset + 2, consumed));
+                layer.fields.push(
+                    Field::new("Transfer mode", mode).at(offset + 2 + consumed, mode_consumed),
+                );
+                decode_tftp_options(payload, 2 + consumed + mode_consumed, offset, &mut layer)?;
+            }
+            3 => {
+                push(
+                    &mut layer,
+                    "Block number",
+                    be_u16(payload, 2)?,
+                    offset + 2,
+                    2,
+                );
+                layer.fields.push(
+                    Field::new("Data", payload[4..].to_vec())
+                        .at(offset + 4, payload.len().saturating_sub(4)),
+                );
+            }
+            4 => {
+                if payload.len() != 4 {
+                    return None;
+                }
+                push(
+                    &mut layer,
+                    "Block number",
+                    be_u16(payload, 2)?,
+                    offset + 2,
+                    2,
+                );
+            }
+            5 => {
+                let code = be_u16(payload, 2)?;
+                let (message, consumed) = tftp_string(payload, 4)?;
+                if 4 + consumed != payload.len() {
+                    return None;
+                }
+                push(
+                    &mut layer,
+                    "Error code",
+                    tftp_error_code(code),
+                    offset + 2,
+                    2,
+                );
+                layer
+                    .fields
+                    .push(Field::new("Error message", message).at(offset + 4, consumed - 1));
+            }
+            6 => decode_tftp_options(payload, 2, offset, &mut layer)?,
+            _ => return None,
+        }
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for SipDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if !matches!(transport.protocol, 6 | 17)
+            || (transport.source_port != 5060 && transport.destination_port != 5060)
+        {
+            return None;
+        }
+        let first_line_end = payload.iter().position(|byte| *byte == b'\n')?;
+        let first_line = trim_ascii_end(&payload[..first_line_end]);
+        let start_line = std::str::from_utf8(first_line).ok()?;
+        let mut parts = start_line.split_ascii_whitespace();
+        let first = parts.next()?;
+        let mut layer = Layer::with_capacity("Session Initiation Protocol", 12);
+        layer
+            .fields
+            .push(Field::new("Start line", start_line.to_owned()).at(offset, first_line.len()));
+        if first.eq_ignore_ascii_case("SIP/2.0") {
+            let status = parts.next()?;
+            if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let status_code = status.parse::<u16>().ok()?;
+            let status_offset = first_line
+                .windows(status.len())
+                .position(|window| window == status.as_bytes())?;
+            push(
+                &mut layer,
+                "Status code",
+                status_code,
+                offset + status_offset,
+                status.len(),
+            );
+            let reason_start = status_offset + status.len();
+            let reason_start = first_line[reason_start..]
+                .iter()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .map_or(first_line.len(), |relative| reason_start + relative);
+            if reason_start < first_line.len() {
+                layer.fields.push(
+                    Field::new(
+                        "Reason phrase",
+                        String::from_utf8_lossy(&first_line[reason_start..]).into_owned(),
+                    )
+                    .at(offset + reason_start, first_line.len() - reason_start),
+                );
+            }
+        } else {
+            let method = sip_method(first)?;
+            let uri = parts.next()?;
+            let version = parts.next()?;
+            if version != "SIP/2.0" || parts.next().is_some() {
+                return None;
+            }
+            layer
+                .fields
+                .push(Field::new("Method", method).at(offset, first.len()));
+            let uri_offset = first_line
+                .windows(uri.len())
+                .position(|window| window == uri.as_bytes())?;
+            layer
+                .fields
+                .push(Field::new("Request URI", uri).at(offset + uri_offset, uri.len()));
+            let version_offset = first_line
+                .windows(version.len())
+                .rposition(|window| window == version.as_bytes())?;
+            layer
+                .fields
+                .push(Field::new("Version", version).at(offset + version_offset, version.len()));
+        }
+
+        let mut cursor = first_line_end + 1;
+        let mut content_length = None;
+        let mut header_count = 0;
+        while cursor < payload.len() && header_count < 256 {
+            let line_start = cursor;
+            let line_end = payload[cursor..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(payload.len(), |relative| cursor + relative);
+            let line = trim_ascii_end(&payload[line_start..line_end]);
+            cursor = line_end.saturating_add(1);
+            if line.is_empty() {
+                break;
+            }
+            if line.first().is_some_and(u8::is_ascii_whitespace) {
+                layer.fields.push(
+                    Field::new(
+                        "Header continuation",
+                        String::from_utf8_lossy(line).into_owned(),
+                    )
+                    .at(offset + line_start, line.len()),
+                );
+                header_count += 1;
+                continue;
+            }
+            let separator = line.iter().position(|byte| *byte == b':')?;
+            let name = std::str::from_utf8(&line[..separator]).ok()?;
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return None;
+            }
+            let value_start = line[separator + 1..]
+                .iter()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .map_or(line.len(), |relative| separator + 1 + relative);
+            let value = String::from_utf8_lossy(&line[value_start..]).into_owned();
+            if name.eq_ignore_ascii_case("content-length") || name.eq_ignore_ascii_case("l") {
+                content_length = Some(value.parse::<usize>().ok()?);
+            }
+            layer.fields.push(
+                Field::new(format!("Header: {name}"), value)
+                    .at(offset + line_start + value_start, line.len() - value_start),
+            );
+            header_count += 1;
+        }
+        let body_length = content_length.unwrap_or(payload.len().saturating_sub(cursor));
+        if body_length > payload.len().saturating_sub(cursor) {
+            return None;
+        }
+        if body_length > 0 {
+            layer.fields.push(
+                Field::new(
+                    "Message body",
+                    String::from_utf8_lossy(&payload[cursor..cursor + body_length]).into_owned(),
+                )
+                .at(offset + cursor, body_length),
+            );
+        }
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for FtpDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 6
+            || (transport.source_port != 21 && transport.destination_port != 21)
+        {
+            return None;
+        }
+        let line_end = payload
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(payload.len());
+        let line = trim_ascii_end(&payload[..line_end.min(1024)]);
+        let separator = line.iter().position(u8::is_ascii_whitespace);
+        let token_end = separator.unwrap_or(line.len());
+        let token = std::str::from_utf8(&line[..token_end]).ok()?;
+        let mut layer = Layer::with_capacity("File Transfer Protocol", 3);
+        if token.len() == 3 && token.bytes().all(|byte| byte.is_ascii_digit()) {
+            push(
+                &mut layer,
+                "Response code",
+                token.parse::<u16>().ok()?,
+                offset,
+                3,
+            );
+            if token_end < line.len() {
+                let delimiter = line[token_end];
+                if !matches!(delimiter, b' ' | b'-') {
+                    return None;
+                }
+                push(
+                    &mut layer,
+                    "Response continuation",
+                    delimiter == b'-',
+                    offset + token_end,
+                    1,
+                );
+            }
+        } else {
+            if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+                return None;
+            }
+            layer
+                .fields
+                .push(Field::new("Command", token.to_ascii_uppercase()).at(offset, token_end));
+        }
+        if token_end < line.len() {
+            let argument_start = token_end + usize::from(line[token_end].is_ascii_whitespace());
+            if argument_start < line.len() {
+                layer.fields.push(
+                    Field::new(
+                        if token.len() == 3 {
+                            "Response text"
+                        } else {
+                            "Argument"
+                        },
+                        String::from_utf8_lossy(&line[argument_start..]).into_owned(),
+                    )
+                    .at(offset + argument_start, line.len() - argument_start),
+                );
+            }
+        }
+        layer.fields.push(
+            Field::new("Line", String::from_utf8_lossy(line).into_owned()).at(offset, line.len()),
+        );
+        Some(layer)
+    }
+}
 
 impl ApplicationDecoder for DnsDecoder {
     fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
@@ -179,6 +610,7 @@ impl ApplicationDecoder for DnsDecoder {
                 );
             }
         }
+        decode_dns_records(dns, dns_offset, questions, answers, &mut layer);
         Some(layer)
     }
 }
@@ -288,6 +720,296 @@ impl ApplicationDecoder for DhcpDecoder {
     }
 }
 
+impl ApplicationDecoder for DhcpV6Decoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 17
+            || !matches!(
+                (transport.source_port, transport.destination_port),
+                (546 | 547, 546 | 547)
+            )
+            || payload.len() < 4
+        {
+            return None;
+        }
+        let message_type = payload[0];
+        let relay = matches!(message_type, 12 | 13);
+        let mut layer = Layer::with_capacity("DHCPv6", 12);
+        push(
+            &mut layer,
+            "Message type",
+            dhcpv6_message_type(message_type),
+            offset,
+            1,
+        );
+        let mut cursor;
+        if relay {
+            if payload.len() < 34 {
+                return None;
+            }
+            push(&mut layer, "Hop count", payload[1], offset + 1, 1);
+            layer.fields.push(
+                Field::new("Link address", <[u8; 16]>::try_from(&payload[2..18]).ok()?)
+                    .at(offset + 2, 16),
+            );
+            layer.fields.push(
+                Field::new("Peer address", <[u8; 16]>::try_from(&payload[18..34]).ok()?)
+                    .at(offset + 18, 16),
+            );
+            cursor = 34;
+        } else {
+            push(
+                &mut layer,
+                "Transaction ID",
+                be_u24(payload, 1)?,
+                offset + 1,
+                3,
+            );
+            cursor = 4;
+        }
+        let mut options = 0;
+        while cursor + 4 <= payload.len() && options < 128 {
+            let code = be_u16(payload, cursor)?;
+            let length = usize::from(be_u16(payload, cursor + 2)?);
+            let value_start = cursor + 4;
+            let value_end = value_start.checked_add(length)?;
+            let value = payload.get(value_start..value_end)?;
+            let option_name = dhcpv6_option_name(code);
+            let option_value = match code {
+                1 | 2 if length == 4 => format!("0x{}", encode_hex(value)),
+                6 if length.is_multiple_of(2) => value
+                    .chunks_exact(2)
+                    .map(|pair| dhcpv6_option_name(be_u16(pair, 0).unwrap()).to_owned())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                14 if length == 0 => "Rapid commit".to_owned(),
+                23 if length.is_multiple_of(16) => value
+                    .chunks_exact(16)
+                    .map(|address| {
+                        Ipv6Addr::from(<[u8; 16]>::try_from(address).unwrap()).to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => format!("{} bytes", length),
+            };
+            layer
+                .fields
+                .push(Field::new(option_name, option_value).at(offset + cursor, 4 + length));
+            cursor = value_end;
+            options += 1;
+        }
+        if cursor != payload.len() && cursor + 4 > payload.len() {
+            return None;
+        }
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for SshDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 6 || !payload.starts_with(b"SSH-") {
+            return None;
+        }
+        let line_end = payload
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(payload.len());
+        let line = payload[..line_end].trim_ascii_end();
+        let mut layer = Layer::new("Secure Shell");
+        layer.fields.push(
+            Field::new(
+                "Identification string",
+                String::from_utf8_lossy(line).into_owned(),
+            )
+            .at(offset, line.len()),
+        );
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for SmtpDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 6
+            || !matches!(
+                (transport.source_port, transport.destination_port),
+                (25 | 465 | 587, _) | (_, 25 | 465 | 587)
+            )
+        {
+            return None;
+        }
+        let line_end = payload
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(payload.len())
+            .min(512);
+        let line = payload.get(..line_end)?.trim_ascii_end();
+        let command = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .next()
+            .filter(|command| {
+                matches!(
+                    *command,
+                    b"220"
+                        | b"221"
+                        | b"250"
+                        | b"354"
+                        | b"421"
+                        | b"450"
+                        | b"451"
+                        | b"452"
+                        | b"500"
+                        | b"501"
+                        | b"502"
+                        | b"503"
+                        | b"504"
+                        | b"550"
+                        | b"551"
+                        | b"552"
+                        | b"553"
+                        | b"554"
+                        | b"EHLO"
+                        | b"HELO"
+                        | b"MAIL"
+                        | b"RCPT"
+                        | b"DATA"
+                        | b"RSET"
+                        | b"NOOP"
+                        | b"QUIT"
+                        | b"STARTTLS"
+                )
+            })?;
+        let mut layer = Layer::new("Simple Mail Transfer Protocol");
+        layer.fields.push(
+            Field::new(
+                "Command or response",
+                String::from_utf8_lossy(command).into_owned(),
+            )
+            .at(offset, command.len()),
+        );
+        layer.fields.push(
+            Field::new("Line", String::from_utf8_lossy(line).into_owned()).at(offset, line.len()),
+        );
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for ImapDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 6
+            || (transport.source_port != 143 && transport.destination_port != 143)
+        {
+            return None;
+        }
+        let line_end = payload
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(payload.len())
+            .min(512);
+        let line = payload.get(..line_end)?.trim_ascii_end();
+        let command = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .next()
+            .filter(|command| {
+                matches!(
+                    command.to_ascii_uppercase().as_slice(),
+                    b"*" | b"A001"
+                        | b"A002"
+                        | b"A003"
+                        | b"A004"
+                        | b"A005"
+                        | b"CAPABILITY"
+                        | b"LOGIN"
+                        | b"LOGOUT"
+                        | b"SELECT"
+                        | b"EXAMINE"
+                        | b"CREATE"
+                        | b"DELETE"
+                        | b"RENAME"
+                        | b"SUBSCRIBE"
+                        | b"UNSUBSCRIBE"
+                        | b"LIST"
+                        | b"LSUB"
+                        | b"STATUS"
+                        | b"APPEND"
+                        | b"CHECK"
+                        | b"CLOSE"
+                        | b"EXPUNGE"
+                        | b"SEARCH"
+                        | b"FETCH"
+                        | b"STORE"
+                        | b"COPY"
+                        | b"NOOP"
+                        | b"STARTTLS"
+                        | b"OK"
+                        | b"PREAUTH"
+                        | b"NO"
+                        | b"BAD"
+                )
+            })?;
+        let mut layer = Layer::new("Internet Message Access Protocol");
+        layer.fields.push(
+            Field::new(
+                "Command or response",
+                String::from_utf8_lossy(command).into_owned(),
+            )
+            .at(offset, command.len()),
+        );
+        layer.fields.push(
+            Field::new("Line", String::from_utf8_lossy(line).into_owned()).at(offset, line.len()),
+        );
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for VxlanDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if transport.protocol != 17
+            || (transport.source_port != 4789 && transport.destination_port != 4789)
+            || payload.len() < 8
+            || payload[0] & 0x08 == 0
+        {
+            return None;
+        }
+        let mut layer = Layer::with_capacity("Virtual eXtensible LAN", 4);
+        push(&mut layer, "Flags", payload[0], offset, 1);
+        layer
+            .fields
+            .push(Field::new("Reserved", payload[1..4].to_vec()).at(offset + 1, 3));
+        push(
+            &mut layer,
+            "VNI",
+            (u32::from(payload[4]) << 16) | (u32::from(payload[5]) << 8) | u32::from(payload[6]),
+            offset + 4,
+            3,
+        );
+        push(&mut layer, "Reserved", payload[7], offset + 7, 1);
+        Some(layer)
+    }
+}
+
+impl ApplicationDecoder for GssapiDecoder {
+    fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
+        if !matches!(transport.protocol, 6 | 17)
+            || !matches!(
+                (transport.source_port, transport.destination_port),
+                (88 | 389 | 636, _) | (_, 88 | 389 | 636)
+            )
+        {
+            return None;
+        }
+        const KERBEROS_MECHANISM_OID: &[u8] =
+            &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+        let oid_start = payload
+            .windows(KERBEROS_MECHANISM_OID.len())
+            .position(|window| window == KERBEROS_MECHANISM_OID)?;
+        let mut layer = Layer::new("Generic Security Services API");
+        layer.fields.push(
+            Field::new("Mechanism", "Kerberos 5")
+                .at(offset + oid_start, KERBEROS_MECHANISM_OID.len()),
+        );
+        Some(layer)
+    }
+}
+
 impl ApplicationDecoder for TlsDecoder {
     fn decode(&self, payload: &[u8], transport: TransportInfo, offset: usize) -> Option<Layer> {
         if transport.protocol != 6 || payload.len() < 5 {
@@ -343,6 +1065,9 @@ impl ApplicationDecoder for TlsDecoder {
                 offset + 6,
                 3,
             );
+            if payload[5] == 1 {
+                decode_tls_client_hello(payload, offset, &mut layer);
+            }
         }
         Some(layer)
     }
@@ -397,8 +1122,16 @@ fn decode_ethernet(frame: &mut Frame, registry: &DecoderRegistry) {
             return;
         }
         let tci = be_u16(data, offset).unwrap();
+        layer.fields.push(Field::new(
+            "VLAN tag index",
+            u64::try_from(vlan_count + 1).unwrap(),
+        ));
+        layer
+            .fields
+            .push(Field::hex("Tag protocol identifier", u64::from(ether_type)).at(offset - 2, 2));
         push(&mut layer, "VLAN ID", tci & 0x0fff, offset, 2);
         push(&mut layer, "VLAN priority", tci >> 13, offset, 2);
+        push(&mut layer, "Drop eligible", tci & 0x1000 != 0, offset, 2);
         ether_type = be_u16(data, offset + 2).unwrap();
         offset += 4;
         vlan_count += 1;
@@ -933,16 +1666,20 @@ fn decode_transport(
     end: usize,
     registry: &DecoderRegistry,
 ) {
-    let Some(data) = frame.raw_data.get(offset..end) else {
-        return malformed(frame, "Invalid transport payload bounds");
-    };
     if protocol == 47 {
         return decode_gre(frame, offset, end, registry);
     }
+    if protocol == 51 {
+        return decode_ah(frame, offset, end, registry);
+    }
+    let Some(data) = frame.raw_data.get(offset..end) else {
+        return malformed(frame, "Invalid transport payload bounds");
+    };
     let decoded = match protocol {
         6 => decode_tcp(data, offset, registry),
         17 => decode_udp(data, offset, registry),
         1 | 58 => decode_icmp(data, offset, protocol == 58),
+        50 => decode_esp(data, offset),
         _ => {
             frame.protocol = match protocol {
                 2 => Cow::Borrowed("IGMP"),
@@ -957,14 +1694,115 @@ fn decode_transport(
     };
     match decoded {
         Ok(decoded) => {
+            let vxlan = decoded
+                .application_layer
+                .as_ref()
+                .is_some_and(|layer| layer.name == "Virtual eXtensible LAN");
             frame.layers.push(decoded.layer);
             if let Some(application_layer) = decoded.application_layer {
                 frame.layers.push(application_layer);
             }
             frame.protocol = decoded.protocol;
             frame.info = decoded.info;
+            if vxlan {
+                decode_ethernet_inner(frame, offset + 16, end, registry);
+            }
         }
         Err(message) => malformed(frame, message),
+    }
+}
+
+fn decode_esp(data: &[u8], offset: usize) -> Result<DecodedTransport, &'static str> {
+    if data.len() < 8 {
+        return Err("Truncated IPsec ESP header");
+    }
+    let mut layer = Layer::new("Encapsulating Security Payload");
+    push(
+        &mut layer,
+        "Security parameters index",
+        be_u32(data, 0).unwrap(),
+        offset,
+        4,
+    );
+    push(
+        &mut layer,
+        "Sequence number",
+        be_u32(data, 4).unwrap(),
+        offset + 4,
+        4,
+    );
+    if data.len() > 8 {
+        layer.fields.push(
+            Field::new("Encrypted payload", data[8..].to_vec()).at(offset + 8, data.len() - 8),
+        );
+    }
+    Ok(DecodedTransport {
+        layer,
+        application_layer: None,
+        protocol: Cow::Borrowed("ESP"),
+        info: "Encrypted IPsec payload".to_owned(),
+    })
+}
+
+fn decode_ah(frame: &mut Frame, offset: usize, end: usize, registry: &DecoderRegistry) {
+    let parsed = frame
+        .raw_data
+        .get(offset..end)
+        .ok_or("Invalid transport payload bounds")
+        .and_then(|data| {
+            if data.len() < 12 {
+                return Err("Truncated IPsec Authentication Header");
+            }
+            let next_header = data[0];
+            let length = (usize::from(data[1]) + 2) * 4;
+            if length < 12 || data.len() < length {
+                return Err("Invalid IPsec Authentication Header length");
+            }
+            let mut layer = Layer::with_capacity("Authentication Header", 5);
+            push(&mut layer, "Next header", next_header, offset, 1);
+            push(&mut layer, "Payload length", data[1], offset + 1, 1);
+            push(
+                &mut layer,
+                "Reserved",
+                be_u16(data, 2).unwrap(),
+                offset + 2,
+                2,
+            );
+            push(
+                &mut layer,
+                "Security parameters index",
+                be_u32(data, 4).unwrap(),
+                offset + 4,
+                4,
+            );
+            push(
+                &mut layer,
+                "Sequence number",
+                be_u32(data, 8).unwrap(),
+                offset + 8,
+                4,
+            );
+            if length > 12 {
+                layer.fields.push(
+                    Field::new("Integrity check value", data[12..length].to_vec())
+                        .at(offset + 12, length - 12),
+                );
+            }
+            Ok((layer, next_header, length))
+        });
+    let (layer, next_header, length) = match parsed {
+        Ok(parsed) => parsed,
+        Err(message) => return malformed(frame, message),
+    };
+    if offset + length > end {
+        return malformed(frame, "Authentication Header exceeds IP payload");
+    }
+    frame.layers.push(layer);
+    if matches!(next_header, 6 | 17 | 1 | 58 | 47 | 50 | 51) {
+        decode_transport(frame, next_header, offset + length, end, registry);
+    } else {
+        frame.protocol = Cow::Borrowed("AH");
+        frame.info = format!("Next header {next_header}");
     }
 }
 
@@ -982,7 +1820,7 @@ fn decode_gre(frame: &mut Frame, offset: usize, end: usize, registry: &DecoderRe
     match protocol {
         0x0800 => decode_ipv4(frame, offset + cursor, registry),
         0x86dd => decode_ipv6(frame, offset + cursor, registry),
-        0x6558 => decode_ethernet_inner(frame, offset + cursor, registry),
+        0x6558 => decode_ethernet_inner(frame, offset + cursor, end, registry),
         _ => {
             frame.protocol = Cow::Borrowed("GRE");
             frame.info = format!("Protocol 0x{protocol:04x}");
@@ -1083,8 +1921,14 @@ fn parse_gre(data: &[u8], offset: usize) -> Result<(Layer, u16, usize), &'static
     Ok((layer, protocol, cursor))
 }
 
-fn decode_ethernet_inner(frame: &mut Frame, offset: usize, registry: &DecoderRegistry) {
-    let Some(header) = frame.raw_data.get(offset..offset + 14) else {
+fn decode_ethernet_inner(frame: &mut Frame, offset: usize, end: usize, registry: &DecoderRegistry) {
+    let Some(header_end) = offset
+        .checked_add(14)
+        .filter(|header_end| *header_end <= end)
+    else {
+        return malformed(frame, "Truncated encapsulated Ethernet header");
+    };
+    let Some(header) = frame.raw_data.get(offset..header_end) else {
         return malformed(frame, "Truncated Ethernet frame inside GRE");
     };
     let mut layer = Layer::with_capacity("Ethernet II", 3);
@@ -1293,6 +2137,10 @@ fn decode_icmp(data: &[u8], offset: usize, ipv6: bool) -> Result<DecodedTranspor
         offset + 2,
         2,
     );
+    let neighbor_discovery = ipv6 && matches!(data[0], 133..=137);
+    if neighbor_discovery {
+        decode_neighbor_discovery(data, offset, &mut layer)?;
+    }
     let echo = if ipv6 {
         matches!(data[0], 128 | 129)
     } else {
@@ -1321,9 +2169,192 @@ fn decode_icmp(data: &[u8], offset: usize, ipv6: bool) -> Result<DecodedTranspor
     Ok(DecodedTransport {
         layer,
         application_layer: None,
-        protocol: Cow::Borrowed(if ipv6 { "ICMPv6" } else { "ICMP" }),
+        protocol: Cow::Borrowed(if neighbor_discovery {
+            "NDP"
+        } else if ipv6 {
+            "ICMPv6"
+        } else {
+            "ICMP"
+        }),
         info: format!("Type {}, code {}", data[0], data[1]),
     })
+}
+
+fn decode_neighbor_discovery(
+    data: &[u8],
+    offset: usize,
+    layer: &mut Layer,
+) -> Result<(), &'static str> {
+    layer.name = "ICMPv6 Neighbor Discovery".into();
+    let mut options_offset = match data[0] {
+        133 => {
+            if data.len() < 8 {
+                return Err("Truncated router solicitation");
+            }
+            push(layer, "Reserved", be_u32(data, 4).unwrap(), offset + 4, 4);
+            8
+        }
+        134 => {
+            if data.len() < 16 {
+                return Err("Truncated router advertisement");
+            }
+            push(layer, "Current hop limit", data[4], offset + 4, 1);
+            push(
+                layer,
+                "Managed address configuration",
+                data[5] & 0x80 != 0,
+                offset + 5,
+                1,
+            );
+            push(
+                layer,
+                "Other configuration",
+                data[5] & 0x40 != 0,
+                offset + 5,
+                1,
+            );
+            push(
+                layer,
+                "Router lifetime",
+                be_u16(data, 6).unwrap(),
+                offset + 6,
+                2,
+            );
+            push(
+                layer,
+                "Reachable time",
+                be_u32(data, 8).unwrap(),
+                offset + 8,
+                4,
+            );
+            push(
+                layer,
+                "Retransmission timer",
+                be_u32(data, 12).unwrap(),
+                offset + 12,
+                4,
+            );
+            16
+        }
+        135 | 136 => {
+            if data.len() < 24 {
+                return Err("Truncated neighbor solicitation or advertisement");
+            }
+            if data[0] == 136 {
+                push(layer, "Router", data[4] & 0x80 != 0, offset + 4, 1);
+                push(layer, "Solicited", data[4] & 0x40 != 0, offset + 4, 1);
+                push(layer, "Override", data[4] & 0x20 != 0, offset + 4, 1);
+            } else {
+                push(layer, "Reserved", be_u32(data, 4).unwrap(), offset + 4, 4);
+            }
+            layer.fields.push(
+                Field::new(
+                    "Target address",
+                    <[u8; 16]>::try_from(&data[8..24]).unwrap(),
+                )
+                .at(offset + 8, 16),
+            );
+            24
+        }
+        137 => {
+            if data.len() < 40 {
+                return Err("Truncated neighbor redirect");
+            }
+            push(layer, "Reserved", be_u32(data, 4).unwrap(), offset + 4, 4);
+            layer.fields.push(
+                Field::new(
+                    "Target address",
+                    <[u8; 16]>::try_from(&data[8..24]).unwrap(),
+                )
+                .at(offset + 8, 16),
+            );
+            layer.fields.push(
+                Field::new(
+                    "Destination address",
+                    <[u8; 16]>::try_from(&data[24..40]).unwrap(),
+                )
+                .at(offset + 24, 16),
+            );
+            40
+        }
+        _ => return Ok(()),
+    };
+
+    let mut option_count = 0;
+    while options_offset < data.len() && option_count < 64 {
+        let option = data
+            .get(options_offset..options_offset + 2)
+            .ok_or("Truncated Neighbor Discovery option header")?;
+        let option_len = usize::from(option[1])
+            .checked_mul(8)
+            .filter(|length| *length >= 8)
+            .ok_or("Invalid Neighbor Discovery option length")?;
+        let bytes = data
+            .get(options_offset..options_offset + option_len)
+            .ok_or("Truncated Neighbor Discovery option")?;
+        let option_offset = offset + options_offset;
+        match option[0] {
+            1 | 2 if option_len >= 8 => layer.fields.push(
+                Field::new(
+                    if option[0] == 1 {
+                        "Source link-layer address"
+                    } else {
+                        "Target link-layer address"
+                    },
+                    mac(&bytes[2..8]),
+                )
+                .at(option_offset + 2, 6),
+            ),
+            3 if option_len == 32 => {
+                push(layer, "Prefix length", bytes[2], option_offset + 2, 1);
+                push(layer, "On-link", bytes[3] & 0x80 != 0, option_offset + 3, 1);
+                push(
+                    layer,
+                    "Autonomous",
+                    bytes[3] & 0x40 != 0,
+                    option_offset + 3,
+                    1,
+                );
+                push(
+                    layer,
+                    "Valid lifetime",
+                    be_u32(bytes, 4).unwrap(),
+                    option_offset + 4,
+                    4,
+                );
+                push(
+                    layer,
+                    "Preferred lifetime",
+                    be_u32(bytes, 8).unwrap(),
+                    option_offset + 8,
+                    4,
+                );
+                layer.fields.push(
+                    Field::new("Prefix", <[u8; 16]>::try_from(&bytes[16..32]).unwrap())
+                        .at(option_offset + 16, 16),
+                );
+            }
+            5 if option_len == 8 => {
+                push(
+                    layer,
+                    "MTU",
+                    be_u32(bytes, 4).unwrap(),
+                    option_offset + 4,
+                    4,
+                );
+            }
+            _ => layer.fields.push(
+                Field::new(nd_option_name(option[0]), bytes[2..].to_vec())
+                    .at(option_offset + 2, option_len - 2),
+            ),
+        }
+        options_offset += option_len;
+        option_count += 1;
+    }
+    if options_offset < data.len() {
+        return Err("Too many Neighbor Discovery options");
+    }
+    Ok(())
 }
 
 fn malformed(frame: &mut Frame, message: &str) {
@@ -1333,7 +2364,7 @@ fn malformed(frame: &mut Frame, message: &str) {
 
 fn push(
     layer: &mut Layer,
-    name: &'static str,
+    name: impl Into<Cow<'static, str>>,
     value: impl Into<crate::parser::layer::FieldValue>,
     offset: usize,
     length: usize,
@@ -1373,6 +2404,24 @@ fn mac(bytes: &[u8]) -> String {
     address
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn encode_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(bytes.len().saturating_mul(4));
+    for byte in bytes {
+        let _ = write!(output, "\\x{byte:02x}");
+    }
+    output
+}
+
 fn address_text(bytes: &[u8]) -> String {
     match bytes.len() {
         4 => Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string(),
@@ -1401,8 +2450,149 @@ fn application_protocol(application: &Layer) -> Cow<'static, str> {
         "DNS" => Cow::Borrowed("DNS"),
         "HTTP" => Cow::Borrowed("HTTP"),
         "Dynamic Host Configuration Protocol" => Cow::Borrowed("DHCP"),
+        "DHCPv6" => Cow::Borrowed("DHCPv6"),
         "Transport Layer Security" => Cow::Borrowed("TLS"),
+        "Secure Shell" => Cow::Borrowed("SSH"),
+        "Simple Mail Transfer Protocol" => Cow::Borrowed("SMTP"),
+        "Internet Message Access Protocol" => Cow::Borrowed("IMAP"),
+        "Virtual eXtensible LAN" => Cow::Borrowed("VXLAN"),
+        "Generic Security Services API" => Cow::Borrowed("GSSAPI"),
+        "Network Time Protocol" => Cow::Borrowed("NTP"),
+        "Trivial File Transfer Protocol" => Cow::Borrowed("TFTP"),
+        "Session Initiation Protocol" => Cow::Borrowed("SIP"),
+        "File Transfer Protocol" => Cow::Borrowed("FTP"),
         _ => application.name.clone(),
+    }
+}
+
+fn ntp_mode(mode: u8) -> &'static str {
+    match mode {
+        0 => "Reserved",
+        1 => "Symmetric active",
+        2 => "Symmetric passive",
+        3 => "Client",
+        4 => "Server",
+        5 => "Broadcast",
+        6 => "Control message",
+        _ => "Private use",
+    }
+}
+
+fn tftp_opcode(opcode: u16) -> Option<&'static str> {
+    match opcode {
+        1 => Some("Read request"),
+        2 => Some("Write request"),
+        3 => Some("Data"),
+        4 => Some("Acknowledgment"),
+        5 => Some("Error"),
+        6 => Some("Option acknowledgment"),
+        _ => None,
+    }
+}
+
+fn tftp_error_code(code: u16) -> &'static str {
+    match code {
+        0 => "Not defined",
+        1 => "File not found",
+        2 => "Access violation",
+        3 => "Disk full or allocation exceeded",
+        4 => "Illegal TFTP operation",
+        5 => "Unknown transfer ID",
+        6 => "File already exists",
+        7 => "No such user",
+        _ => "Unknown error",
+    }
+}
+
+fn tftp_string(payload: &[u8], start: usize) -> Option<(String, usize)> {
+    let tail = payload.get(start..)?;
+    let length = tail.iter().position(|byte| *byte == 0)?;
+    Some((
+        String::from_utf8_lossy(&tail[..length]).into_owned(),
+        length + 1,
+    ))
+}
+
+fn decode_tftp_options(
+    payload: &[u8],
+    mut cursor: usize,
+    offset: usize,
+    layer: &mut Layer,
+) -> Option<()> {
+    while cursor < payload.len() {
+        let (name, name_length) = tftp_string(payload, cursor)?;
+        let value_start = cursor.checked_add(name_length)?;
+        let (value, value_length) = tftp_string(payload, value_start)?;
+        if name.is_empty() || value.is_empty() {
+            return None;
+        }
+        layer.fields.push(
+            Field::new(format!("Option: {name}"), value).at(offset + value_start, value_length - 1),
+        );
+        cursor = value_start.checked_add(value_length)?;
+    }
+    Some(())
+}
+
+fn sip_method(method: &str) -> Option<&str> {
+    (!method.is_empty()
+        && method
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.!%*+`'~".contains(&byte)))
+    .then_some(method)
+}
+
+fn trim_ascii_end(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(0, |index| index + 1);
+    &bytes[..end]
+}
+
+fn dhcpv6_message_type(message_type: u8) -> &'static str {
+    match message_type {
+        1 => "Solicit",
+        2 => "Advertise",
+        3 => "Request",
+        4 => "Confirm",
+        5 => "Renew",
+        6 => "Rebind",
+        7 => "Reply",
+        8 => "Release",
+        9 => "Decline",
+        10 => "Reconfigure",
+        11 => "Information-request",
+        12 => "Relay-forward",
+        13 => "Relay-reply",
+        _ => "Unknown",
+    }
+}
+
+fn dhcpv6_option_name(option: u16) -> &'static str {
+    match option {
+        1 => "Client identifier",
+        2 => "Server identifier",
+        3 => "Identity association",
+        5 => "IA address",
+        6 => "Option request",
+        8 => "Elapsed time",
+        14 => "Rapid commit",
+        23 => "DNS recursive name server",
+        24 => "Domain search list",
+        25 => "Identity association for prefix delegation",
+        _ => "DHCPv6 option",
+    }
+}
+
+fn nd_option_name(option: u8) -> &'static str {
+    match option {
+        1 => "Source link-layer address",
+        2 => "Target link-layer address",
+        3 => "Prefix information",
+        4 => "Redirected header",
+        5 => "MTU",
+        _ => "Neighbor Discovery option",
     }
 }
 
@@ -1491,6 +2681,165 @@ fn dns_name(data: &[u8], start: usize) -> Option<(String, usize)> {
     Some((labels.join("."), consumed))
 }
 
+fn decode_dns_records(dns: &[u8], offset: usize, questions: u16, answers: u16, layer: &mut Layer) {
+    let mut cursor = 12;
+    for _ in 0..questions.min(64) {
+        let Some((_, name_len)) = dns_name(dns, cursor) else {
+            return;
+        };
+        let Some(next) = cursor
+            .checked_add(name_len)
+            .and_then(|next| next.checked_add(4))
+        else {
+            return;
+        };
+        if next > dns.len() {
+            return;
+        }
+        cursor = next;
+    }
+
+    for index in 0..answers.min(64) {
+        let Some((name, name_len)) = dns_name(dns, cursor) else {
+            return;
+        };
+        let Some(fixed) = cursor.checked_add(name_len) else {
+            return;
+        };
+        let Some(header) = dns.get(fixed..fixed + 10) else {
+            return;
+        };
+        let kind = be_u16(header, 0).unwrap();
+        let data_len = usize::from(be_u16(header, 8).unwrap());
+        let data_start = fixed + 10;
+        let Some(record_data) = dns.get(data_start..data_start + data_len) else {
+            return;
+        };
+        let prefix = format!("Answer {}", index + 1);
+        layer
+            .fields
+            .push(Field::new(format!("{prefix} name"), name).at(offset + cursor, name_len));
+        layer.fields.push(
+            Field::new(format!("{prefix} type"), dns_record_type(kind)).at(offset + fixed, 2),
+        );
+        layer.fields.push(
+            Field::new(format!("{prefix} TTL"), be_u32(header, 4).unwrap() as u64)
+                .at(offset + fixed + 4, 4),
+        );
+        let value = match kind {
+            1 if data_len == 4 => {
+                Ipv4Addr::from(<[u8; 4]>::try_from(record_data).unwrap()).to_string()
+            }
+            28 if data_len == 16 => {
+                Ipv6Addr::from(<[u8; 16]>::try_from(record_data).unwrap()).to_string()
+            }
+            2 | 5 | 12 => dns_name(dns, data_start)
+                .map(|(name, _)| name)
+                .unwrap_or_else(|| format!("0x{}", encode_bytes(record_data))),
+            15 if data_len >= 3 => {
+                let exchange = dns_name(dns, data_start + 2)
+                    .map(|(name, _)| name)
+                    .unwrap_or_default();
+                format!("{} {exchange}", be_u16(record_data, 0).unwrap())
+            }
+            16 => String::from_utf8_lossy(record_data).into_owned(),
+            _ => format!("0x{}", encode_bytes(record_data)),
+        };
+        layer
+            .fields
+            .push(Field::new(format!("{prefix} data"), value).at(offset + data_start, data_len));
+        cursor = data_start + data_len;
+    }
+}
+
+fn decode_tls_client_hello(payload: &[u8], offset: usize, layer: &mut Layer) {
+    let body_start = 9;
+    let Some(session_len) = payload.get(body_start + 34).copied().map(usize::from) else {
+        return;
+    };
+    let Some(cipher_len_offset) = (body_start + 35).checked_add(session_len) else {
+        return;
+    };
+    let Some(cipher_len) = be_u16(payload, cipher_len_offset).map(usize::from) else {
+        return;
+    };
+    let Some(compression_len_offset) = cipher_len_offset
+        .checked_add(2)
+        .and_then(|cursor| cursor.checked_add(cipher_len))
+    else {
+        return;
+    };
+    let Some(compression_len) = payload
+        .get(compression_len_offset)
+        .copied()
+        .map(usize::from)
+    else {
+        return;
+    };
+    let Some(extensions_len_offset) = compression_len_offset
+        .checked_add(1)
+        .and_then(|cursor| cursor.checked_add(compression_len))
+    else {
+        return;
+    };
+    let Some(extensions_len) = be_u16(payload, extensions_len_offset).map(usize::from) else {
+        return;
+    };
+    let Some(extensions_end) = extensions_len_offset
+        .checked_add(2)
+        .and_then(|cursor| cursor.checked_add(extensions_len))
+        .filter(|end| *end <= payload.len())
+    else {
+        return;
+    };
+    let mut cursor = extensions_len_offset + 2;
+    while cursor + 4 <= extensions_end {
+        let kind = be_u16(payload, cursor).unwrap();
+        let length = usize::from(be_u16(payload, cursor + 2).unwrap());
+        let data_start = cursor + 4;
+        let Some(data_end) = data_start
+            .checked_add(length)
+            .filter(|end| *end <= extensions_end)
+        else {
+            return;
+        };
+        let data = &payload[data_start..data_end];
+        match kind {
+            0 if data.len() >= 5 => {
+                let list_len = usize::from(be_u16(data, 0).unwrap());
+                if list_len + 2 <= data.len() {
+                    let name_len = usize::from(be_u16(data, 3).unwrap());
+                    if data[2] == 0
+                        && let Some(name) = data.get(5..5 + name_len)
+                    {
+                        layer.fields.push(
+                            Field::new("Server name", String::from_utf8_lossy(name).into_owned())
+                                .at(offset + data_start + 5, name_len),
+                        );
+                    }
+                }
+            }
+            16 if data.len() >= 3 => {
+                let list_len = usize::from(be_u16(data, 0).unwrap());
+                if list_len + 2 <= data.len() {
+                    let protocol_len = usize::from(data[2]);
+                    if let Some(protocol) = data.get(3..3 + protocol_len) {
+                        layer.fields.push(
+                            Field::new(
+                                "Application protocol",
+                                String::from_utf8_lossy(protocol).into_owned(),
+                            )
+                            .at(offset + data_start + 3, protocol_len),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        cursor = data_end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,7 +2876,7 @@ mod tests {
         assert!(tls.fields.iter().any(|field| {
             field.name == "Handshake type" && field.value.to_string() == "Client Hello"
         }));
-        assert_eq!(summarize_packet(&frame.raw_data, 1).protocol, "TCP");
+        assert_eq!(summarize_packet(&frame.raw_data, 1).protocol, "TLS");
     }
 
     #[test]
@@ -1574,5 +2923,363 @@ mod tests {
                 .any(|layer| layer.name == "Generic Routing Encapsulation")
         );
         assert_eq!(frame.protocol, "ICMP");
+    }
+
+    #[test]
+    fn decodes_dhcpv6_options() {
+        let payload = [
+            1, 0x12, 0x34, 0x56, // Solicit and transaction ID
+            0, 6, 0, 2, 0, 23, // Option request: DNS recursive name server
+        ];
+        let decoder = DhcpV6Decoder;
+        let layer = decoder
+            .decode(
+                &payload,
+                TransportInfo {
+                    protocol: 17,
+                    source_port: 546,
+                    destination_port: 547,
+                },
+                8,
+            )
+            .unwrap();
+        assert_eq!(layer.name, "DHCPv6");
+        assert!(
+            layer.fields.iter().any(|field| {
+                field.name == "Message type" && field.value.to_string() == "Solicit"
+            })
+        );
+        assert!(layer.fields.iter().any(|field| {
+            field.name == "Option request" && field.value.to_string() == "DNS recursive name server"
+        }));
+    }
+
+    #[test]
+    fn decodes_vxlan_header_and_inner_ethernet() {
+        let mut udp = vec![0; 8];
+        udp[0..2].copy_from_slice(&40000_u16.to_be_bytes());
+        udp[2..4].copy_from_slice(&4789_u16.to_be_bytes());
+        let mut vxlan_payload = vec![0x08, 0, 0, 0, 0x12, 0x34, 0x56, 0];
+        vxlan_payload.extend_from_slice(&[0; 12]);
+        vxlan_payload.extend_from_slice(&0x0806_u16.to_be_bytes());
+        vxlan_payload.extend_from_slice(&[0; 28]);
+        let udp_length = (udp.len() + vxlan_payload.len()) as u16;
+        udp[4..6].copy_from_slice(&udp_length.to_be_bytes());
+        udp.extend_from_slice(&vxlan_payload);
+        let mut frame = ipv4_frame(17, &udp);
+
+        decode_frame(&mut frame, 1, &DecoderRegistry::new());
+
+        assert!(
+            frame
+                .layers
+                .iter()
+                .any(|layer| layer.name == "Virtual eXtensible LAN")
+        );
+        assert!(frame.layers.iter().any(|layer| layer.name == "Ethernet II"));
+        assert_eq!(frame.protocol, "ARP");
+    }
+
+    #[test]
+    fn decodes_neighbor_discovery_target_and_link_layer_options() {
+        let mut ndp = vec![0; 32];
+        ndp[0] = 135;
+        ndp[8..24].copy_from_slice(&[0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        ndp[24..32].copy_from_slice(&[1, 1, 0, 1, 2, 3, 4, 5]);
+
+        let decoded = decode_icmp(&ndp, 40, true).unwrap();
+
+        assert_eq!(decoded.protocol, "NDP");
+        assert_eq!(decoded.layer.name, "ICMPv6 Neighbor Discovery");
+        assert!(decoded.layer.fields.iter().any(|field| {
+            field.name == "Target address" && field.value.to_string() == "2001:db08::1"
+        }));
+        assert!(decoded.layer.fields.iter().any(|field| {
+            field.name == "Source link-layer address"
+                && field.value.to_string() == "00:01:02:03:04:05"
+        }));
+    }
+
+    #[test]
+    fn decodes_dns_answer_records_and_tls_client_hello_sni() {
+        let mut dns = vec![0; 12];
+        dns[0..2].copy_from_slice(&0x1234_u16.to_be_bytes());
+        dns[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        dns[4..6].copy_from_slice(&1_u16.to_be_bytes());
+        dns[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        dns.extend_from_slice(&[1, b'a', 3, b'c', b'o', b'm', 0, 0, 1, 0, 1]);
+        dns.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1]);
+        dns.extend_from_slice(&60_u32.to_be_bytes());
+        dns.extend_from_slice(&[0, 4, 192, 0, 2, 10]);
+        let dns_layer = DnsDecoder
+            .decode(
+                &dns,
+                TransportInfo {
+                    protocol: 17,
+                    source_port: 53,
+                    destination_port: 40000,
+                },
+                42,
+            )
+            .unwrap();
+        assert!(dns_layer.fields.iter().any(|field| {
+            field.name == "Answer 1 data" && field.value.to_string() == "192.0.2.10"
+        }));
+
+        let mut hello = vec![22, 3, 3, 0, 0, 1, 0, 0, 0];
+        hello.extend_from_slice(&[3, 3]);
+        hello.extend_from_slice(&[0; 32]);
+        hello.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+        let mut extensions = vec![0, 0, 0, 10, 0, 8, 0, 0, 5];
+        extensions.extend_from_slice(b"a.com");
+        hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        hello.extend_from_slice(&extensions);
+        let record_length = (hello.len() - 5) as u16;
+        hello[3..5].copy_from_slice(&record_length.to_be_bytes());
+        let handshake_length = (hello.len() - 9) as u32;
+        hello[6] = (handshake_length >> 16) as u8;
+        hello[7] = (handshake_length >> 8) as u8;
+        hello[8] = handshake_length as u8;
+        let mut tls_layer = Layer::new("Transport Layer Security");
+        decode_tls_client_hello(&hello, 100, &mut tls_layer);
+        assert!(
+            tls_layer
+                .fields
+                .iter()
+                .any(|field| { field.name == "Server name" && field.value.to_string() == "a.com" })
+        );
+    }
+
+    #[test]
+    fn decodes_ssh_smtp_imap_and_gssapi_mechanism() {
+        let cases = [
+            (
+                SshDecoder.decode(
+                    b"SSH-2.0-OpenSSH_9.0\r\n",
+                    TransportInfo {
+                        protocol: 6,
+                        source_port: 50_000,
+                        destination_port: 22,
+                    },
+                    0,
+                ),
+                "Secure Shell",
+            ),
+            (
+                SmtpDecoder.decode(
+                    b"EHLO example.test\r\n",
+                    TransportInfo {
+                        protocol: 6,
+                        source_port: 50_000,
+                        destination_port: 25,
+                    },
+                    0,
+                ),
+                "Simple Mail Transfer Protocol",
+            ),
+            (
+                ImapDecoder.decode(
+                    b"A001 CAPABILITY\r\n",
+                    TransportInfo {
+                        protocol: 6,
+                        source_port: 50_000,
+                        destination_port: 143,
+                    },
+                    0,
+                ),
+                "Internet Message Access Protocol",
+            ),
+        ];
+        for (layer, expected_name) in cases {
+            assert_eq!(layer.unwrap().name, expected_name);
+        }
+
+        let oid = [
+            0x60, 0x0b, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+        ];
+        let layer = GssapiDecoder
+            .decode(
+                &oid,
+                TransportInfo {
+                    protocol: 6,
+                    source_port: 389,
+                    destination_port: 50_000,
+                },
+                12,
+            )
+            .unwrap();
+        assert_eq!(layer.name, "Generic Security Services API");
+        assert_eq!(layer.fields[0].value.to_string(), "Kerberos 5");
+    }
+
+    #[test]
+    fn decodes_ntp_header_extensions_and_rejects_truncation() {
+        let mut payload = vec![0; 52];
+        payload[0] = 0x23;
+        payload[1] = 2;
+        payload[4..8].copy_from_slice(&0xffff_8000_u32.to_be_bytes());
+        payload[16..20].copy_from_slice(&1_u32.to_be_bytes());
+        payload[20..24].copy_from_slice(&2_u32.to_be_bytes());
+        payload[48..50].copy_from_slice(&0x0102_u16.to_be_bytes());
+        payload[50..52].copy_from_slice(&4_u16.to_be_bytes());
+        let transport = TransportInfo {
+            protocol: 17,
+            source_port: 123,
+            destination_port: 40_000,
+        };
+        let layer = NtpDecoder.decode(&payload, transport, 8).unwrap();
+
+        assert!(
+            layer
+                .fields
+                .iter()
+                .any(|field| { field.name == "Version" && field.value.to_string() == "4" })
+        );
+        assert!(
+            layer
+                .fields
+                .iter()
+                .any(|field| { field.name == "Mode" && field.value.to_string() == "Client" })
+        );
+        assert!(
+            layer.fields.iter().any(|field| {
+                field.name == "Root delay" && field.value.to_string() == "-0.5000"
+            })
+        );
+        assert!(layer.fields.iter().any(|field| {
+            field.name == "Reference timestamp seconds" && field.value.to_string() == "1"
+        }));
+        assert!(
+            layer.fields.iter().any(|field| {
+                field.name == "Extension type" && field.value.to_string() == "258"
+            })
+        );
+        assert!(NtpDecoder.decode(&payload[..47], transport, 8).is_none());
+    }
+
+    #[test]
+    fn decodes_tftp_requests_data_and_rejects_incomplete_options() {
+        let request = b"\0\x01firmware.bin\0octet\0blksize\01428\0";
+        let transport = TransportInfo {
+            protocol: 17,
+            source_port: 40_000,
+            destination_port: 69,
+        };
+        let layer = TftpDecoder.decode(request, transport, 8).unwrap();
+        assert!(layer.fields.iter().any(|field| {
+            field.name == "Filename" && field.value.to_string() == "firmware.bin"
+        }));
+        assert!(
+            layer.fields.iter().any(|field| {
+                field.name == "Transfer mode" && field.value.to_string() == "octet"
+            })
+        );
+        assert!(
+            layer.fields.iter().any(|field| {
+                field.name == "Option: blksize" && field.value.to_string() == "1428"
+            })
+        );
+        assert!(
+            TftpDecoder
+                .decode(b"\0\x01file\0octet\0blksize\0", transport, 8)
+                .is_none()
+        );
+
+        let data = TftpDecoder
+            .decode(b"\0\x03\0\x07abc", transport, 8)
+            .unwrap();
+        assert!(
+            data.fields
+                .iter()
+                .any(|field| { field.name == "Block number" && field.value.to_string() == "7" })
+        );
+        assert!(
+            data.fields
+                .iter()
+                .any(|field| field.name == "Data" && field.value.to_string() == "616263")
+        );
+    }
+
+    #[test]
+    fn decodes_sip_start_line_headers_and_content_length_body() {
+        let payload = b"INVITE sip:a@example.test SIP/2.0\r\nVia: SIP/2.0/UDP host\r\nContent-Length: 4\r\nX-Trace: yes\r\n\r\ntestTRAIL";
+        let transport = TransportInfo {
+            protocol: 6,
+            source_port: 40_000,
+            destination_port: 5060,
+        };
+        let layer = SipDecoder.decode(payload, transport, 100).unwrap();
+        assert!(
+            layer
+                .fields
+                .iter()
+                .any(|field| { field.name == "Method" && field.value.to_string() == "INVITE" })
+        );
+        assert!(layer.fields.iter().any(|field| {
+            field.name == "Request URI" && field.value.to_string() == "sip:a@example.test"
+        }));
+        assert!(layer.fields.iter().any(|field| {
+            field.name == "Header: Via" && field.value.to_string() == "SIP/2.0/UDP host"
+        }));
+        assert!(
+            layer
+                .fields
+                .iter()
+                .any(|field| { field.name == "Message body" && field.value.to_string() == "test" })
+        );
+        let truncated = b"OPTIONS sip:a@example.test SIP/2.0\r\nContent-Length: 6\r\n\r\nbody";
+        assert!(SipDecoder.decode(truncated, transport, 100).is_none());
+    }
+
+    #[test]
+    fn decodes_ftp_commands_and_server_responses() {
+        let transport = TransportInfo {
+            protocol: 6,
+            source_port: 21,
+            destination_port: 40_000,
+        };
+        let command = FtpDecoder
+            .decode(b"RETR archive.tar\r\n", transport, 20)
+            .unwrap();
+        assert!(
+            command
+                .fields
+                .iter()
+                .any(|field| { field.name == "Command" && field.value.to_string() == "RETR" })
+        );
+        assert!(
+            command.fields.iter().any(|field| {
+                field.name == "Argument" && field.value.to_string() == "archive.tar"
+            })
+        );
+        let response = FtpDecoder
+            .decode(b"150 Opening data connection\r\n", transport, 20)
+            .unwrap();
+        assert!(
+            response
+                .fields
+                .iter()
+                .any(|field| { field.name == "Response code" && field.value.to_string() == "150" })
+        );
+    }
+
+    #[test]
+    fn decodes_ipv4_authentication_header_before_tcp() {
+        let mut ah = vec![6, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2];
+        let mut tcp = vec![0; 20];
+        tcp[12] = 0x50;
+        tcp.extend_from_slice(b"SSH-2.0-test\r\n");
+        ah.extend_from_slice(&tcp);
+        let mut frame = ipv4_frame(51, &ah);
+
+        decode_frame(&mut frame, 1, &DecoderRegistry::new());
+
+        assert!(
+            frame
+                .layers
+                .iter()
+                .any(|layer| layer.name == "Authentication Header")
+        );
+        assert_eq!(frame.protocol, "SSH");
     }
 }

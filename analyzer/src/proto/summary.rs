@@ -269,10 +269,47 @@ fn summarize_transport(
             result.tcp_acknowledgment = Some(tcp.acknowledgment.get());
             result.tcp_flags = Some(tcp.flags);
             result.tcp_window = Some(tcp.window.get());
-            result.protocol = if looks_http(&data[header_len..]) {
+            let payload = &data[header_len..];
+            result.protocol = if (result.source_port == Some(5060)
+                || result.destination_port == Some(5060))
+                && looks_sip(payload)
+            {
+                "SIP"
+            } else if looks_http(payload) {
                 "HTTP"
+            } else if looks_tls(payload) {
+                "TLS"
+            } else if (result.source_port == Some(21) || result.destination_port == Some(21))
+                && looks_ftp(payload)
+            {
+                "FTP"
             } else if result.source_port == Some(53) || result.destination_port == Some(53) {
                 "DNS"
+            } else if looks_ssh(payload)
+                || result.source_port == Some(22)
+                || result.destination_port == Some(22)
+            {
+                "SSH"
+            } else if matches!(
+                (result.source_port, result.destination_port),
+                (Some(88 | 389 | 636), _) | (_, Some(88 | 389 | 636))
+            ) && has_gssapi_oid(payload)
+            {
+                "GSSAPI"
+            } else if result.source_port == Some(88) || result.destination_port == Some(88) {
+                "Kerberos"
+            } else if looks_smtp(payload)
+                || matches!(
+                    (result.source_port, result.destination_port),
+                    (Some(25 | 587), _) | (_, Some(25 | 587))
+                )
+            {
+                "SMTP"
+            } else if looks_imap(payload)
+                || result.source_port == Some(143)
+                || result.destination_port == Some(143)
+            {
+                "IMAP"
             } else {
                 "TCP"
             };
@@ -299,6 +336,41 @@ fn summarize_transport(
             ) && payload.get(236..240) == Some(&[99, 130, 83, 99])
             {
                 "DHCP"
+            } else if matches!(
+                (result.source_port, result.destination_port),
+                (Some(546 | 547), Some(546 | 547))
+            ) && payload.first().is_some_and(|kind| (1..=13).contains(kind))
+            {
+                "DHCPv6"
+            } else if (result.source_port == Some(69) || result.destination_port == Some(69))
+                && looks_tftp(payload)
+            {
+                "TFTP"
+            } else if (result.source_port == Some(123) || result.destination_port == Some(123))
+                && payload.len() >= 48
+            {
+                "NTP"
+            } else if (result.source_port == Some(5060) || result.destination_port == Some(5060))
+                && looks_sip(payload)
+            {
+                "SIP"
+            } else if (result.source_port == Some(4789) || result.destination_port == Some(4789))
+                && payload.first().is_some_and(|flags| flags & 0x08 != 0)
+            {
+                "VXLAN"
+            } else if matches!(
+                (result.source_port, result.destination_port),
+                (Some(88 | 389 | 636), _) | (_, Some(88 | 389 | 636))
+            ) && has_gssapi_oid(payload)
+            {
+                "GSSAPI"
+            } else if result.source_port == Some(88) || result.destination_port == Some(88) {
+                "Kerberos"
+            } else if matches!(
+                (result.source_port, result.destination_port),
+                (Some(500 | 4500), _) | (_, Some(500 | 4500))
+            ) {
+                "IPsec"
             } else if result.source_port == Some(53) || result.destination_port == Some(53) {
                 "DNS"
             } else {
@@ -306,10 +378,18 @@ fn summarize_transport(
             };
         }
         17 => result.protocol = "Malformed",
+        47 => result.protocol = "GRE",
+        50 | 51 => result.protocol = "IPsec",
         1 | 58 if data.len() >= 2 => {
             result.icmp_type = Some(data[0]);
             result.icmp_code = Some(data[1]);
-            result.protocol = if protocol == 1 { "ICMP" } else { "ICMPv6" };
+            result.protocol = if protocol == 1 {
+                "ICMP"
+            } else if matches!(data[0], 133..=137) {
+                "NDP"
+            } else {
+                "ICMPv6"
+            };
         }
         1 => result.protocol = "ICMP",
         58 => result.protocol = "ICMPv6",
@@ -364,6 +444,104 @@ fn looks_http(payload: &[u8]) -> bool {
         || payload.starts_with(b"OPTIONS ")
         || payload.starts_with(b"PATCH ")
         || payload.starts_with(b"HTTP/")
+}
+
+fn looks_tls(payload: &[u8]) -> bool {
+    payload.len() >= 5
+        && matches!(payload[0], 20..=23)
+        && matches!(
+            u16::from_be_bytes([payload[1], payload[2]]),
+            0x0301..=0x0304
+        )
+}
+
+fn looks_ssh(payload: &[u8]) -> bool {
+    payload.starts_with(b"SSH-")
+}
+
+fn looks_smtp(payload: &[u8]) -> bool {
+    [
+        b"220 ".as_slice(),
+        b"250 ".as_slice(),
+        b"250-".as_slice(),
+        b"EHLO ".as_slice(),
+        b"HELO ".as_slice(),
+        b"MAIL FROM:".as_slice(),
+        b"RCPT TO:".as_slice(),
+        b"DATA\r\n".as_slice(),
+        b"QUIT\r\n".as_slice(),
+    ]
+    .iter()
+    .any(|prefix| payload.starts_with(prefix))
+}
+
+fn looks_imap(payload: &[u8]) -> bool {
+    [
+        b"* OK ".as_slice(),
+        b"* PREAUTH ".as_slice(),
+        b"A001 ".as_slice(),
+        b"A002 ".as_slice(),
+        b"CAPABILITY\r\n".as_slice(),
+        b"LOGIN ".as_slice(),
+        b"SELECT ".as_slice(),
+        b"FETCH ".as_slice(),
+        b"LIST ".as_slice(),
+        b"NOOP\r\n".as_slice(),
+    ]
+    .iter()
+    .any(|prefix| payload.starts_with(prefix))
+}
+
+fn looks_sip(payload: &[u8]) -> bool {
+    let line = payload
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if let Some(status) = line.strip_prefix(b"SIP/2.0 ") {
+        return status
+            .get(..3)
+            .is_some_and(|code| code.iter().all(u8::is_ascii_digit));
+    }
+    line.windows(b" SIP/2.0".len())
+        .any(|window| window == b" SIP/2.0")
+}
+
+fn looks_ftp(payload: &[u8]) -> bool {
+    let line = payload
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if line.len() >= 3 && line[..3].iter().all(u8::is_ascii_digit) {
+        return line.len() == 3 || matches!(line[3], b' ' | b'-');
+    }
+    let command_length = line
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(line.len());
+    command_length > 0 && line[..command_length].iter().all(u8::is_ascii_alphabetic)
+}
+
+fn looks_tftp(payload: &[u8]) -> bool {
+    match payload
+        .get(..2)
+        .map(|opcode| u16::from_be_bytes([opcode[0], opcode[1]]))
+    {
+        Some(1 | 2) => payload.len() >= 4 && payload[2..].contains(&0),
+        Some(3) => payload.len() >= 4,
+        Some(4) => payload.len() == 4,
+        Some(5) => payload.len() >= 5 && payload[4..].contains(&0),
+        Some(6) => payload.len() >= 4 && payload[2..].contains(&0),
+        _ => false,
+    }
+}
+
+fn has_gssapi_oid(payload: &[u8]) -> bool {
+    const KERBEROS_MECHANISM_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+    payload
+        .windows(KERBEROS_MECHANISM_OID.len())
+        .any(|window| window == KERBEROS_MECHANISM_OID)
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -444,5 +622,101 @@ mod tests {
         mpls.extend_from_slice(&0x0000_0140_u32.to_be_bytes());
         mpls.extend_from_slice(&ip);
         assert_eq!(summarize_packet(&mpls, 1).protocol, "ICMP");
+    }
+
+    fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0; 14 + 20 + payload.len()];
+        packet[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        packet[14] = 0x45;
+        packet[16..18].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+        packet[23] = protocol;
+        packet[34..].copy_from_slice(payload);
+        packet
+    }
+
+    #[test]
+    fn identifies_new_application_protocols_from_headers_and_signatures() {
+        let mut tcp = vec![0; 20];
+        tcp[0..2].copy_from_slice(&50_000_u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&22_u16.to_be_bytes());
+        tcp[12] = 0x50;
+        tcp.extend_from_slice(b"SSH-2.0-OpenSSH_9.0\r\n");
+        assert_eq!(summarize_packet(&ipv4_packet(6, &tcp), 1).protocol, "SSH");
+
+        let mut udp = vec![0; 8];
+        udp[0..2].copy_from_slice(&546_u16.to_be_bytes());
+        udp[2..4].copy_from_slice(&547_u16.to_be_bytes());
+        udp[4..6].copy_from_slice(&12_u16.to_be_bytes());
+        udp.extend_from_slice(&[1, 0, 0, 1]);
+        assert_eq!(
+            summarize_packet(&ipv4_packet(17, &udp), 1).protocol,
+            "DHCPv6"
+        );
+    }
+
+    #[test]
+    fn identifies_ntp_tftp_sip_and_ftp_in_packet_summaries() {
+        let mut ntp = vec![0; 8 + 48];
+        ntp[0..2].copy_from_slice(&40_000_u16.to_be_bytes());
+        ntp[2..4].copy_from_slice(&123_u16.to_be_bytes());
+        let ntp_length = ntp.len() as u16;
+        ntp[4..6].copy_from_slice(&ntp_length.to_be_bytes());
+        ntp[8] = 0x23;
+        assert_eq!(summarize_packet(&ipv4_packet(17, &ntp), 1).protocol, "NTP");
+
+        let tftp_payload = b"\0\x01file.txt\0octet\0";
+        let mut tftp = vec![0; 8];
+        tftp[0..2].copy_from_slice(&40_000_u16.to_be_bytes());
+        tftp[2..4].copy_from_slice(&69_u16.to_be_bytes());
+        tftp[4..6].copy_from_slice(&((8 + tftp_payload.len()) as u16).to_be_bytes());
+        tftp.extend_from_slice(tftp_payload);
+        assert_eq!(
+            summarize_packet(&ipv4_packet(17, &tftp), 1).protocol,
+            "TFTP"
+        );
+
+        let mut sip = vec![0; 20];
+        sip[0..2].copy_from_slice(&40_000_u16.to_be_bytes());
+        sip[2..4].copy_from_slice(&5060_u16.to_be_bytes());
+        sip[12] = 0x50;
+        sip.extend_from_slice(b"OPTIONS sip:a@example.test SIP/2.0\r\n");
+        assert_eq!(summarize_packet(&ipv4_packet(6, &sip), 1).protocol, "SIP");
+
+        let mut ftp = vec![0; 20];
+        ftp[0..2].copy_from_slice(&40_000_u16.to_be_bytes());
+        ftp[2..4].copy_from_slice(&21_u16.to_be_bytes());
+        ftp[12] = 0x50;
+        ftp.extend_from_slice(b"RETR file.txt\r\n");
+        assert_eq!(summarize_packet(&ipv4_packet(6, &ftp), 1).protocol, "FTP");
+    }
+
+    #[test]
+    fn identifies_vxlan_gre_ipsec_and_neighbor_discovery() {
+        let mut vxlan = vec![0; 16];
+        vxlan[0..2].copy_from_slice(&50000_u16.to_be_bytes());
+        vxlan[2..4].copy_from_slice(&4789_u16.to_be_bytes());
+        vxlan[4..6].copy_from_slice(&16_u16.to_be_bytes());
+        vxlan[8] = 0x08;
+        assert_eq!(
+            summarize_packet(&ipv4_packet(17, &vxlan), 1).protocol,
+            "VXLAN"
+        );
+
+        assert_eq!(
+            summarize_packet(&ipv4_packet(47, &[0, 0, 8, 0]), 1).protocol,
+            "GRE"
+        );
+        assert_eq!(
+            summarize_packet(&ipv4_packet(50, &[0; 8]), 1).protocol,
+            "IPsec"
+        );
+
+        let mut ipv6 = vec![0; 14 + 40 + 4];
+        ipv6[12..14].copy_from_slice(&0x86dd_u16.to_be_bytes());
+        ipv6[14] = 0x60;
+        ipv6[18..20].copy_from_slice(&4_u16.to_be_bytes());
+        ipv6[20] = 58;
+        ipv6[54] = 135;
+        assert_eq!(summarize_packet(&ipv6, 1).protocol, "NDP");
     }
 }
