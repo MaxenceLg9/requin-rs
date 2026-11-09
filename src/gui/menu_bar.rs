@@ -11,6 +11,12 @@ const MENU_TRIGGER_HORIZONTAL_PADDING: f32 = 16.;
 const MENU_ITEM_HEIGHT: f32 = 28.;
 const MENU_SEPARATOR_HEIGHT: f32 = 9.;
 const MENU_POPUP_Y_ADJUSTMENT: f32 = 6.;
+const REGISTERED_MENUS: [MenuKind; 4] = [
+    MenuKind::File,
+    MenuKind::Edit,
+    MenuKind::View,
+    MenuKind::Help,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuKind {
@@ -27,8 +33,6 @@ pub enum MenuAction {
     ExportDisplayed,
     ExportSelected,
     Quit,
-    CopyHex,
-    CopyAscii,
     ClearFilter,
     ToggleTheme,
     About,
@@ -92,43 +96,17 @@ impl MenuBar {
             );
 
         if expanded {
-            bar = bar
-                .child(menu_button(
-                    MenuKind::File,
+            bar = bar.children(REGISTERED_MENUS.into_iter().map(|menu| {
+                register_menu(
+                    menu,
                     active_menu,
                     light_theme,
                     has_capture,
                     has_selected_frame,
                     has_packets,
                     handler.clone(),
-                ))
-                .child(menu_button(
-                    MenuKind::Edit,
-                    active_menu,
-                    light_theme,
-                    has_capture,
-                    has_selected_frame,
-                    has_packets,
-                    handler.clone(),
-                ))
-                .child(menu_button(
-                    MenuKind::View,
-                    active_menu,
-                    light_theme,
-                    has_capture,
-                    has_selected_frame,
-                    has_packets,
-                    handler.clone(),
-                ))
-                .child(menu_button(
-                    MenuKind::Help,
-                    active_menu,
-                    light_theme,
-                    has_capture,
-                    has_selected_frame,
-                    has_packets,
-                    handler,
-                ));
+                )
+            }));
         }
 
         bar.child(div().flex_1()).child(
@@ -141,7 +119,7 @@ impl MenuBar {
     }
 }
 
-fn menu_button(
+fn register_menu(
     menu: MenuKind,
     active_menu: Option<MenuKind>,
     light_theme: bool,
@@ -152,16 +130,16 @@ fn menu_button(
 ) -> impl IntoElement {
     let active = active_menu == Some(menu);
     let popup = match menu {
-        MenuKind::File => file_menu(
+        MenuKind::File => register_file_menu(
             light_theme,
             has_capture,
             has_selected_frame,
             has_packets,
             handler.clone(),
         ),
-        MenuKind::Edit => edit_menu(light_theme, has_selected_frame, handler.clone()),
-        MenuKind::View => view_menu(light_theme, handler.clone()),
-        MenuKind::Help => help_menu(light_theme, handler.clone()),
+        MenuKind::Edit => register_edit_menu(light_theme, has_selected_frame, handler.clone()),
+        MenuKind::View => register_view_menu(light_theme, handler.clone()),
+        MenuKind::Help => register_help_menu(light_theme, handler.clone()),
     };
     let menu_hover_handler = handler.clone();
     let menu_activate_handler = handler;
@@ -374,111 +352,133 @@ fn hamburger_button(open: bool, light_theme: bool) -> gpui::Stateful<gpui::Div> 
         .child("☰")
 }
 
-fn file_menu(
+enum MenuItemDefinition {
+    Action {
+        label: &'static str,
+        shortcut: &'static str,
+        enabled: bool,
+        action: MenuAction,
+    },
+    Separator,
+}
+
+fn register_file_menu(
     light_theme: bool,
     has_capture: bool,
     has_selected_frame: bool,
     has_packets: bool,
     handler: MenuBarHandler,
 ) -> gpui::Div {
-    menu_panel(light_theme)
-        .child(action_item(
-            "Open File…",
-            "Ctrl+O",
-            true,
-            MenuAction::OpenCapture,
-            light_theme,
-            handler.clone(),
-        ))
-        .child(action_item(
-            "Reload Capture",
-            "Ctrl+R",
-            has_capture,
-            MenuAction::ReloadCapture,
-            light_theme,
-            handler.clone(),
-        ))
-        .child(menu_separator(light_theme))
-        .child(action_item(
-            "Export Displayed…",
-            "",
-            has_packets,
-            MenuAction::ExportDisplayed,
-            light_theme,
-            handler.clone(),
-        ))
-        .child(action_item(
-            "Export Selected…",
-            "",
-            has_selected_frame,
-            MenuAction::ExportSelected,
-            light_theme,
-            handler.clone(),
-        ))
-        .child(menu_separator(light_theme))
-        .child(action_item(
-            "Quit",
-            "Ctrl+Q",
-            true,
-            MenuAction::Quit,
-            light_theme,
-            handler,
-        ))
-}
-
-fn edit_menu(light_theme: bool, has_selected_frame: bool, handler: MenuBarHandler) -> gpui::Div {
-    menu_panel(light_theme)
-        .child(action_item(
-            "Copy packet bytes (hex)",
-            "",
-            has_selected_frame,
-            MenuAction::CopyHex,
-            light_theme,
-            handler.clone(),
-        ))
-        .child(action_item(
-            "Copy packet bytes (ASCII)",
-            "",
-            has_selected_frame,
-            MenuAction::CopyAscii,
-            light_theme,
-            handler.clone(),
-        ))
-        .child(menu_separator(light_theme))
-        .child(action_item(
-            "Clear display filter",
-            "",
-            true,
-            MenuAction::ClearFilter,
-            light_theme,
-            handler,
-        ))
-}
-
-fn view_menu(light_theme: bool, handler: MenuBarHandler) -> gpui::Div {
-    menu_panel(light_theme).child(action_item(
-        if light_theme {
-            "Switch to Dark Theme"
-        } else {
-            "Switch to Light Theme"
-        },
-        "",
-        true,
-        MenuAction::ToggleTheme,
+    register_menu_items(
         light_theme,
         handler,
-    ))
+        [
+            MenuItemDefinition::Action {
+                label: "Open File…",
+                shortcut: "Ctrl+O",
+                enabled: true,
+                action: MenuAction::OpenCapture,
+            },
+            MenuItemDefinition::Action {
+                label: "Reload Capture",
+                shortcut: "Ctrl+R",
+                enabled: has_capture,
+                action: MenuAction::ReloadCapture,
+            },
+            MenuItemDefinition::Separator,
+            MenuItemDefinition::Action {
+                label: "Export Displayed…",
+                shortcut: "",
+                enabled: has_packets,
+                action: MenuAction::ExportDisplayed,
+            },
+            MenuItemDefinition::Action {
+                label: "Export Selected…",
+                shortcut: "",
+                enabled: has_selected_frame,
+                action: MenuAction::ExportSelected,
+            },
+            MenuItemDefinition::Separator,
+            MenuItemDefinition::Action {
+                label: "Quit",
+                shortcut: "Ctrl+Q",
+                enabled: true,
+                action: MenuAction::Quit,
+            },
+        ],
+    )
 }
 
-fn help_menu(light_theme: bool, handler: MenuBarHandler) -> gpui::Div {
-    menu_panel(light_theme).child(action_item(
-        "About Requin",
-        "",
-        true,
-        MenuAction::About,
+fn register_edit_menu(
+    light_theme: bool,
+    _has_selected_frame: bool,
+    handler: MenuBarHandler,
+) -> gpui::Div {
+    register_menu_items(
         light_theme,
         handler,
-    ))
+        [MenuItemDefinition::Action {
+            label: "Clear display filter",
+            shortcut: "",
+            enabled: true,
+            action: MenuAction::ClearFilter,
+        }],
+    )
+}
+
+fn register_view_menu(light_theme: bool, handler: MenuBarHandler) -> gpui::Div {
+    register_menu_items(
+        light_theme,
+        handler,
+        [MenuItemDefinition::Action {
+            label: if light_theme {
+                "Switch to Dark Theme"
+            } else {
+                "Switch to Light Theme"
+            },
+            shortcut: "",
+            enabled: true,
+            action: MenuAction::ToggleTheme,
+        }],
+    )
+}
+
+fn register_help_menu(light_theme: bool, handler: MenuBarHandler) -> gpui::Div {
+    register_menu_items(
+        light_theme,
+        handler,
+        [MenuItemDefinition::Action {
+            label: "About Requin",
+            shortcut: "",
+            enabled: true,
+            action: MenuAction::About,
+        }],
+    )
+}
+
+fn register_menu_items(
+    light_theme: bool,
+    handler: MenuBarHandler,
+    items: impl IntoIterator<Item = MenuItemDefinition>,
+) -> gpui::Div {
+    items
+        .into_iter()
+        .fold(menu_panel(light_theme), |panel, item| match item {
+            MenuItemDefinition::Action {
+                label,
+                shortcut,
+                enabled,
+                action,
+            } => panel.child(action_item(
+                label,
+                shortcut,
+                enabled,
+                action,
+                light_theme,
+                handler.clone(),
+            )),
+            MenuItemDefinition::Separator => panel.child(menu_separator(light_theme)),
+        })
 }
 
 fn action_item(

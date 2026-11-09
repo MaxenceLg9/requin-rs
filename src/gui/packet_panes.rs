@@ -1,8 +1,10 @@
-use gpui::{ClipboardItem, Context, IntoElement, div, prelude::*, px};
+use gpui::{Context, IntoElement, div, prelude::*, px};
 
 use super::{
     app::AnalyzerUi,
-    packet_view::{HEX_PAGE_BYTES, hex_preview, icon_button, pane_heading, render_layers},
+    packet_view::{
+        HEX_PAGE_BYTES, bytes_copy_menu, hex_preview, icon_button, pane_heading, render_layers,
+    },
     theme::ui_color,
 };
 
@@ -54,6 +56,7 @@ pub(super) fn render(
                         .flex()
                         .h(px(35.))
                         .flex_shrink_0()
+                        .relative()
                         .items_center()
                         .px_3()
                         .bg(ui_color(0x202a35, light_theme))
@@ -102,31 +105,19 @@ pub(super) fn render(
                         )
                         .child(
                             div()
-                                .id("copy-hex")
+                                .id("copy-bytes")
                                 .px_2()
-                                .child("Copy hex")
+                                .child("Copy ▾")
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(frame) = &this.selected_frame {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            frame.hex_ascii(),
-                                        ));
-                                    }
+                                    this.bytes_copy_menu_open = !this.bytes_copy_menu_open;
+                                    this.copy_context_menu = None;
+                                    cx.notify();
                                 })),
                         )
-                        .child(
-                            div()
-                                .id("copy-ascii")
-                                .px_2()
-                                .child("Copy ASCII")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(frame) = &this.selected_frame {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            String::from_utf8_lossy(&frame.raw_data).into_owned(),
-                                        ));
-                                    }
-                                })),
+                        .children(
+                            this.bytes_copy_menu_open
+                                .then(|| bytes_copy_menu(light_theme, cx).into_any_element()),
                         ),
                 )
                 .child(

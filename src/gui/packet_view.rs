@@ -1,12 +1,30 @@
 use analyzer::{
-    parser::{frame::Frame, pcap::CaptureSummary},
+    parser::{frame::Frame, layer::Layer, pcap::CaptureSummary},
     proto::Address,
 };
-use gpui::{AnyElement, ClipboardItem, Context, IntoElement, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    StyledText, div, prelude::*, px,
+};
+use std::ops::Range;
 
 use super::{app::AnalyzerUi, theme::ui_color};
 
 pub(super) const HEX_PAGE_BYTES: usize = 384;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CopyTarget {
+    Frame,
+    Layer(usize),
+    Field { layer: usize, field: usize },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CopyFormat {
+    Hex,
+    Text,
+    Bytes,
+}
 
 pub(super) fn render_layers(
     this: &AnalyzerUi,
@@ -49,21 +67,16 @@ pub(super) fn render_layers(
                 .child(if expanded { "▾" } else { "▸" })
                 .child(layer.name.to_string())
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .id(format!("copy-layer-{layer_index}"))
-                        .px_2()
-                        .text_color(ui_color(0x8c9baa, light_theme))
-                        .child("Copy")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(layer) = this
-                                .selected_frame
-                                .as_ref()
-                                .and_then(|frame| frame.layers.get(layer_index))
-                            {
-                                cx.write_to_clipboard(ClipboardItem::new_string(layer.to_string()));
-                            }
-                        })),
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.show_copy_context_menu(
+                            CopyTarget::Layer(layer_index),
+                            event.position,
+                            window.viewport_size(),
+                            cx,
+                        );
+                    }),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_layer(layer_index, cx);
@@ -96,6 +109,9 @@ pub(super) fn render_layers(
                         )
                     },
                 );
+                let field_value = field.value.to_string();
+                let field_name_id = format!("field-name-{layer_index}-{field_index}");
+                let field_value_id = format!("field-value-{layer_index}-{field_index}");
                 elements.push(
                     div()
                         .id(format!("field-{layer_index}-{field_index}"))
@@ -110,15 +126,33 @@ pub(super) fn render_layers(
                             ui_color(0x151b22, light_theme)
                         })
                         .text_color(ui_color(0xc2ced9, light_theme))
-                        .child(table_cell(field_name, 1.))
-                        .child(
-                            div()
-                                .flex_basis(px(0.))
-                                .flex_grow(1.6)
-                                .flex_shrink(1.)
-                                .min_w(px(0.))
-                                .overflow_hidden()
-                                .child(field.value.to_string()),
+                        .child(selectable_table_cell(
+                            field_name,
+                            field_name_id,
+                            1.,
+                            this,
+                            cx,
+                        ))
+                        .child(selectable_table_cell(
+                            field_value,
+                            field_value_id,
+                            1.6,
+                            this,
+                            cx,
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.show_copy_context_menu(
+                                    CopyTarget::Field {
+                                        layer: layer_index,
+                                        field: field_index,
+                                    },
+                                    event.position,
+                                    window.viewport_size(),
+                                    cx,
+                                );
+                            }),
                         )
                         .into_any_element(),
                 );
@@ -191,6 +225,277 @@ pub(super) fn table_cell(text: impl ToString, weight: f32) -> gpui::Div {
         .child(text.to_string())
 }
 
+fn selectable_table_cell(
+    text: String,
+    id: String,
+    weight: f32,
+    this: &AnalyzerUi,
+    cx: &mut Context<AnalyzerUi>,
+) -> gpui::Stateful<gpui::Div> {
+    let selected_range = this
+        .detail_selection
+        .as_ref()
+        .filter(|selection| selection.id == id)
+        .map(|selection| selection.anchor.min(selection.head)..selection.anchor.max(selection.head))
+        .filter(|range| !range.is_empty());
+    let mut styled_text = StyledText::new(text.clone());
+    if let Some(range) = selected_range {
+        styled_text = styled_text.with_highlights([(
+            range,
+            HighlightStyle {
+                background_color: Some(ui_color(0x244665, this.light_theme)),
+                ..Default::default()
+            },
+        )]);
+    }
+    let text_layout = styled_text.layout().clone();
+    let selection_id = id.clone();
+    let selection_text = text.clone();
+    let focus_handle = cx.focus_handle();
+    div()
+        .id(id)
+        .flex_basis(px(0.))
+        .flex_grow(weight)
+        .flex_shrink(1.)
+        .min_w(px(0.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .key_context("FrameDetails")
+        .track_focus(&focus_handle)
+        .cursor(gpui::CursorStyle::IBeam)
+        .child(styled_text)
+        .on_mouse_down(MouseButton::Left, {
+            let id = selection_id.clone();
+            let text = selection_text.clone();
+            let layout = text_layout.clone();
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                let index = layout
+                    .index_for_position(event.position)
+                    .unwrap_or_else(|index| index)
+                    .min(text.len());
+                this.start_detail_selection(id.clone(), text.clone(), index, cx);
+                window.focus(&focus_handle, cx);
+            })
+        })
+        .on_mouse_move({
+            let id = selection_id.clone();
+            let layout = text_layout.clone();
+            cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let index = layout
+                    .index_for_position(event.position)
+                    .unwrap_or_else(|index| index);
+                this.extend_detail_selection(&id, index, cx);
+            })
+        })
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.stop_detail_selection(cx);
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.stop_detail_selection(cx);
+            }),
+        )
+        .on_key_down(cx.listener(|this, event, _, cx| {
+            this.handle_detail_key(event, cx);
+        }))
+}
+
+pub(super) fn render_copy_context_menu(
+    this: &AnalyzerUi,
+    cx: &mut Context<AnalyzerUi>,
+) -> Option<AnyElement> {
+    let menu = this.copy_context_menu?;
+    let hover_handler = cx.listener(|this, hovered, _, cx| {
+        if *hovered {
+            this.set_copy_submenu_open(true, cx);
+        }
+    });
+    let mut menu_element = div()
+        .absolute()
+        .left(menu.position.x)
+        .top(menu.position.y)
+        .w(px(150.))
+        .p_1()
+        .rounded_md()
+        .border_1()
+        .border_color(ui_color(0x3a4857, this.light_theme))
+        .bg(ui_color(0x202a35, this.light_theme))
+        .shadow_lg()
+        .child(
+            div()
+                .id("context-copy-trigger")
+                .w_full()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .child("Copy  ›")
+                .on_hover(hover_handler),
+        );
+
+    if menu.submenu_open {
+        menu_element = menu_element.child(context_copy_submenu(menu.target, this.light_theme, cx));
+    }
+    Some(menu_element.into_any_element())
+}
+
+fn context_copy_submenu(
+    target: CopyTarget,
+    light_theme: bool,
+    cx: &mut Context<AnalyzerUi>,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(148.))
+        .top(px(0.))
+        .w(px(150.))
+        .p_1()
+        .rounded_md()
+        .border_1()
+        .border_color(ui_color(0x3a4857, light_theme))
+        .bg(ui_color(0x202a35, light_theme))
+        .shadow_lg()
+        .child(copy_option(
+            "Copy as HEX",
+            target,
+            CopyFormat::Hex,
+            light_theme,
+            cx,
+        ))
+        .child(copy_option(
+            "Copy as Text",
+            target,
+            CopyFormat::Text,
+            light_theme,
+            cx,
+        ))
+        .child(copy_option(
+            "Copy as bytes",
+            target,
+            CopyFormat::Bytes,
+            light_theme,
+            cx,
+        ))
+}
+
+fn copy_option(
+    label: &'static str,
+    target: CopyTarget,
+    format: CopyFormat,
+    light_theme: bool,
+    cx: &mut Context<AnalyzerUi>,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(label)
+        .w_full()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_size(px(12.))
+        .text_color(ui_color(0xdce5ef, light_theme))
+        .child(label)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.copy_target(target, format, cx);
+        }))
+}
+
+pub(super) fn copy_payload(
+    frame: &Frame,
+    target: CopyTarget,
+    format: CopyFormat,
+) -> Option<String> {
+    let (text, bytes) = match target {
+        CopyTarget::Frame => (
+            String::from_utf8_lossy(&frame.raw_data).into_owned(),
+            &frame.raw_data[..],
+        ),
+        CopyTarget::Layer(layer_index) => {
+            let layer = frame.layers.get(layer_index)?;
+            let range = layer_byte_range(layer)?;
+            (layer.to_string(), frame.raw_data.get(range)?)
+        }
+        CopyTarget::Field { layer, field } => {
+            let field = frame.layers.get(layer)?.fields.get(field)?;
+            let value = field.value.to_string();
+            let range = field.offset?..field.offset?.checked_add(field.length?)?;
+            (value, frame.raw_data.get(range)?)
+        }
+    };
+    Some(match format {
+        CopyFormat::Hex => encode_hex(bytes),
+        CopyFormat::Text => text,
+        CopyFormat::Bytes => encode_bytes(bytes),
+    })
+}
+
+fn layer_byte_range(layer: &Layer) -> Option<Range<usize>> {
+    let start = layer.fields.iter().filter_map(|field| field.offset).min()?;
+    let end = layer
+        .fields
+        .iter()
+        .filter_map(|field| field.offset?.checked_add(field.length?))
+        .max()?;
+    (start < end).then_some(start..end)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn encode_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(bytes.len() * 4);
+    for byte in bytes {
+        let _ = write!(output, "\\x{byte:02x}");
+    }
+    output
+}
+
+pub(super) fn bytes_copy_menu(light_theme: bool, cx: &mut Context<AnalyzerUi>) -> impl IntoElement {
+    div()
+        .absolute()
+        .right(px(8.))
+        .top(px(32.))
+        .w(px(150.))
+        .p_1()
+        .rounded_md()
+        .border_1()
+        .border_color(ui_color(0x3a4857, light_theme))
+        .bg(ui_color(0x202a35, light_theme))
+        .shadow_lg()
+        .child(copy_option(
+            "Copy as HEX",
+            CopyTarget::Frame,
+            CopyFormat::Hex,
+            light_theme,
+            cx,
+        ))
+        .child(copy_option(
+            "Copy as Text",
+            CopyTarget::Frame,
+            CopyFormat::Text,
+            light_theme,
+            cx,
+        ))
+        .child(copy_option(
+            "Copy as bytes",
+            CopyTarget::Frame,
+            CopyFormat::Bytes,
+            light_theme,
+            cx,
+        ))
+}
+
 pub(super) fn address(address: Option<Address>) -> String {
     address.map_or_else(|| "-".to_owned(), Address::format)
 }
@@ -202,6 +507,10 @@ pub(super) fn packet_info(packet: CaptureSummary) -> String {
             "HTTP" => format!("HTTP {source} → {destination}"),
             "TLS" => format!("TLS {source} → {destination}"),
             "DHCP" => format!("DHCP {source} → {destination}"),
+            "NTP" => format!("NTP {source} → {destination}"),
+            "TFTP" => format!("TFTP {source} → {destination}"),
+            "SIP" => format!("SIP {source} → {destination}"),
+            "FTP" => format!("FTP {source} → {destination}"),
             _ => format!("{source} → {destination}"),
         },
         _ => packet.packet.protocol.to_owned(),
@@ -210,9 +519,15 @@ pub(super) fn packet_info(packet: CaptureSummary) -> String {
 
 pub(super) fn protocol_cell(protocol: &'static str, light_theme: bool) -> gpui::Div {
     let color = match protocol {
-        "TCP" | "HTTP" | "TLS" => ui_color(0x9bd18b, light_theme),
-        "UDP" | "DNS" | "DHCP" => ui_color(0x82c9dc, light_theme),
-        "ICMP" | "ICMPv6" | "ARP" => ui_color(0xe4c274, light_theme),
+        "TCP" | "HTTP" | "TLS" | "SSH" | "SMTP" | "IMAP" | "SIP" | "FTP" => {
+            ui_color(0x9bd18b, light_theme)
+        }
+        "UDP" | "DNS" | "DHCP" | "DHCPv6" | "VXLAN" | "GSSAPI" | "NTP" | "TFTP" => {
+            ui_color(0x82c9dc, light_theme)
+        }
+        "ICMP" | "ICMPv6" | "NDP" | "ARP" | "MPLS" | "GRE" | "IPsec" | "ESP" | "AH" => {
+            ui_color(0xe4c274, light_theme)
+        }
         "Malformed" => ui_color(0xec8b83, light_theme),
         _ => ui_color(0xdce5ef, light_theme),
     };
@@ -253,4 +568,57 @@ pub(super) fn hex_preview(frame: Option<&Frame>, offset: usize) -> String {
         output.push_str("|\n");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use analyzer::parser::layer::{Field, Layer};
+
+    use super::*;
+
+    #[test]
+    fn copies_field_values_as_text_hex_or_escaped_bytes() {
+        let mut frame = Frame::new(1, Duration::ZERO, 3, 1, vec![0x41, 0x00, 0xff]);
+        frame
+            .layers
+            .push(Layer::new("Test").field(Field::new("payload", "A").at(0, 3)));
+        let target = CopyTarget::Field { layer: 0, field: 0 };
+
+        assert_eq!(
+            copy_payload(&frame, target, CopyFormat::Hex).as_deref(),
+            Some("4100ff")
+        );
+        assert_eq!(
+            copy_payload(&frame, target, CopyFormat::Text).as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            copy_payload(&frame, target, CopyFormat::Bytes).as_deref(),
+            Some(r"\x41\x00\xff")
+        );
+    }
+
+    #[test]
+    fn copies_layer_bytes_using_its_field_offsets() {
+        let mut frame = Frame::new(1, Duration::ZERO, 4, 1, vec![0xaa, 0xbb, 0xcc, 0xdd]);
+        frame.layers.push(
+            Layer::new("Test")
+                .field(Field::new("first", 1u8).at(1, 1))
+                .field(Field::new("last", 2u8).at(2, 1)),
+        );
+
+        assert_eq!(
+            copy_payload(&frame, CopyTarget::Layer(0), CopyFormat::Hex).as_deref(),
+            Some("bbcc")
+        );
+    }
+
+    #[test]
+    fn selection_offsets_are_clamped_to_utf8_boundaries() {
+        let value = "éclair";
+        assert_eq!(super::super::app::char_boundary_at_or_before(value, 1), 0);
+        assert_eq!(super::super::app::char_boundary_at_or_before(value, 2), 2);
+    }
 }

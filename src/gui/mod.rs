@@ -8,5 +8,6 @@ mod packet_panes;
 mod packet_view;
 mod status_bar;
 mod theme;
+mod timeline;
 
 pub use app::run;

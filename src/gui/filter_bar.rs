@@ -8,7 +8,10 @@ pub(super) fn render(
     cx: &mut Context<AnalyzerUi>,
 ) -> impl IntoElement {
     let light_theme = this.light_theme;
-    let filter_focus = cx.focus_handle();
+    let filter_focus = this
+        .filter_focus
+        .get_or_insert_with(|| cx.focus_handle())
+        .clone();
     let filter_focused = filter_focus.is_focused(window);
     let filter_preview = if this.filter_text.is_empty() {
         "Try: tcp.port == 443  ||  dns  ||  ip.src == 192.0.2.1".to_owned()

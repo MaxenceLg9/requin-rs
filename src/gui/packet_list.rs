@@ -1,9 +1,9 @@
-use gpui::{Context, div, prelude::*, px, uniform_list};
+use gpui::{Context, MouseButton, MouseDownEvent, div, prelude::*, px, uniform_list};
 use std::ops::Range;
 
 use super::{
     app::AnalyzerUi,
-    packet_view::{address, format_timestamp, packet_info, protocol_cell, table_cell},
+    packet_view::{CopyTarget, address, format_timestamp, packet_info, protocol_cell, table_cell},
     theme::ui_color,
 };
 
@@ -42,14 +42,42 @@ pub(super) fn rows(this: &AnalyzerUi, cx: &mut Context<AnalyzerUi>) -> impl Into
                             .child(table_cell(packet.number.to_string(), 0.75))
                             .child(table_cell(format_timestamp(packet), 1.4))
                             .child(table_cell(address(packet.packet.source), 1.6))
+                            .child(table_cell(
+                                packet
+                                    .packet
+                                    .source_port
+                                    .map_or_else(|| "-".to_owned(), |port| port.to_string()),
+                                0.8,
+                            ))
                             .child(table_cell(address(packet.packet.destination), 1.6))
+                            .child(table_cell(
+                                packet
+                                    .packet
+                                    .destination_port
+                                    .map_or_else(|| "-".to_owned(), |port| port.to_string()),
+                                0.8,
+                            ))
                             .child(protocol_cell(packet.packet.protocol, light_theme))
-                            .child(table_cell(packet.captured_len.to_string(), 0.9))
+                            .child(table_cell(packet.captured_len.to_string(), 0.8))
                             .child(table_cell(packet_info(packet), 2.2))
                             .on_click(move |_, window, cx| {
                                 row_entity.update(cx, |this, cx| {
                                     this.select_packet(packet_index, window, cx);
                                 });
+                            })
+                            .on_mouse_down(MouseButton::Right, {
+                                let row_entity = entity.clone();
+                                move |event: &MouseDownEvent, window, app| {
+                                    row_entity.update(app, |this, cx| {
+                                        this.select_packet(packet_index, window, cx);
+                                        this.show_copy_context_menu(
+                                            CopyTarget::Frame,
+                                            event.position,
+                                            window.viewport_size(),
+                                            cx,
+                                        );
+                                    });
+                                }
                             }),
                     )
                 })
@@ -75,8 +103,10 @@ pub(super) fn header(light_theme: bool) -> impl IntoElement {
         .child(table_cell("No.", 0.75))
         .child(table_cell("Time", 1.4))
         .child(table_cell("Source", 1.6))
+        .child(table_cell("Src Port", 0.8))
         .child(table_cell("Destination", 1.6))
+        .child(table_cell("Dst Port", 0.8))
         .child(table_cell("Protocol", 0.9))
-        .child(table_cell("Length", 0.9))
+        .child(table_cell("Length", 0.8))
         .child(table_cell("Info", 2.2))
 }
